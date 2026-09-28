@@ -1,10 +1,11 @@
-/** DOM heads-up display: status, schematic, weapons, helm, markers, banners and screens. */
+/** DOM heads-up display: status, clickable schematic, guns, helm, prompts, markers and screens. */
 
 import './hud.css';
 import { Vector3, type Camera } from 'three';
-import { PLAYER_WEAPON_ORDER, WEAPONS, type WeaponId } from '../weapons/weaponDefs';
 import type { Boat } from '../boat/Boat';
-import type { Resource } from '../game/Loot';
+import type { PartInstance } from '../boat/BoatStats';
+import type { LootKind } from '../game/Loot';
+import type { JobStatus } from '../game/Repairs';
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls = '', html = ''): HTMLElementTagNameMap[K] {
   const e = document.createElement(tag);
@@ -15,6 +16,48 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls = '', html = ''):
 
 const _v = new Vector3();
 
+export interface CrewInfo {
+  count: number;
+  berths: number;
+  food: number;
+  starving: boolean;
+  recruitEta: number | null;
+  gunners: number;
+  repairers: number;
+}
+
+export interface Prompt {
+  text: string;
+  progress?: number;
+}
+
+export interface HudState {
+  player: Boat | null;
+  crew: CrewInfo;
+  jobStatus: (p: PartInstance) => JobStatus | null;
+  wood: number;
+  metal: number;
+  wave: number;
+  waveSub: string;
+  score: number;
+  mouseX: number;
+  mouseY: number;
+  canBear: boolean;
+  lead: { x: number; y: number } | null;
+  enemies: Boat[];
+  camera: Camera;
+  width: number;
+  height: number;
+  prompt: Prompt | null;
+  building: boolean;
+}
+
+interface Layout {
+  ox: number;
+  oy: number;
+  cell: number;
+}
+
 export class Hud {
   readonly root = el('div', 'hud');
   private readonly hullFill: HTMLElement;
@@ -23,10 +66,15 @@ export class Hud {
   private readonly schematic: HTMLCanvasElement;
   private readonly wood: HTMLElement;
   private readonly metal: HTMLElement;
+  private readonly food: HTMLElement;
+  private readonly crewLine: HTMLElement;
+  private readonly crewNote: HTMLElement;
   private readonly waveNum: HTMLElement;
   private readonly waveSub: HTMLElement;
   private readonly score: HTMLElement;
-  private readonly slots: { root: HTMLElement; fill: HTMLElement; bar: HTMLElement; state: HTMLElement }[] = [];
+  private readonly guns: HTMLElement;
+  private gunKey = '';
+  private gunRows: { fill: HTMLElement; bar: HTMLElement; state: HTMLElement }[] = [];
   private readonly speed: HTMLElement;
   private readonly throttle: HTMLElement;
   private readonly crosshair: HTMLElement;
@@ -34,16 +82,25 @@ export class Hud {
   private readonly hitmarker: HTMLElement;
   private readonly lead: HTMLElement;
   private readonly banner: HTMLElement;
+  private readonly prompt: HTMLElement;
+  private readonly promptText: HTMLElement;
+  private readonly promptFill: HTMLElement;
   private readonly bars = new Map<Boat, HTMLElement>();
   private readonly layer = el('div');
+  private readonly combatPanels: HTMLElement[];
   readonly title: HTMLElement;
   readonly over: HTMLElement;
   readonly pause: HTMLElement;
   private hitTimer = 0;
   private bannerTimer = 0;
+  private layout: Layout = { ox: 0, oy: 0, cell: 1 };
+  private lastPlayer: Boat | null = null;
+  /** clicked a block on the schematic */
+  onSchematicClick: ((part: PartInstance) => void) | null = null;
 
   constructor(parent: HTMLElement) {
     const status = el('div', 'panel', '<div class="label">Your vessel</div>');
+    status.id = 'status';
     this.boatName = el('div', 'name big', 'Dinghy');
     status.append(this.boatName, el('div', 'label', 'Hull'));
     this.hullBar = el('div', 'bar');
@@ -51,14 +108,23 @@ export class Hud {
     this.hullBar.append(this.hullFill);
     this.schematic = el('canvas');
     this.schematic.id = 'schematic';
-    this.schematic.width = 160;
-    this.schematic.height = 130;
+    this.schematic.width = 190;
+    this.schematic.height = 150;
+    this.schematic.title = 'Click a damaged block to send crew to repair it';
+    this.schematic.addEventListener('mousedown', (e) => {
+      e.stopPropagation();
+      const part = this.partAt(e.offsetX, e.offsetY);
+      if (part) this.onSchematicClick?.(part);
+    });
+    const hint = el('div', 'hint', 'Click a block to repair · <kbd>R</kbd> repair all');
     const res = el('div', 'resources');
     this.wood = el('span', 'res wood', '0');
     this.metal = el('span', 'res metal', '0');
-    res.append(this.wood, this.metal);
-    status.append(this.hullBar, this.schematic, res);
-    status.id = 'status';
+    this.food = el('span', 'res food', '0');
+    res.append(this.wood, this.metal, this.food);
+    this.crewLine = el('div', 'crew');
+    this.crewNote = el('div', 'label crewnote');
+    status.append(this.hullBar, this.schematic, hint, res, this.crewLine, this.crewNote);
 
     const wave = el('div', 'panel');
     wave.id = 'waveinfo';
@@ -68,19 +134,8 @@ export class Hud {
     this.score = el('div', '', '0');
     wave.append(this.waveNum, this.waveSub, el('div', 'label', 'Score'), this.score);
 
-    const weapons = el('div', 'panel');
-    weapons.id = 'weapons';
-    PLAYER_WEAPON_ORDER.forEach((id, i) => {
-      const root = el('div', 'slot');
-      root.append(el('span', 'key', String(i + 1)), el('span', 'wname', WEAPONS[id].name));
-      const bar = el('div', 'bar');
-      const fill = el('i');
-      bar.append(fill);
-      const state = el('div', 'state');
-      root.append(bar, state);
-      weapons.append(root);
-      this.slots.push({ root, fill, bar, state });
-    });
+    this.guns = el('div', 'panel');
+    this.guns.id = 'weapons';
 
     const helm = el('div', 'panel');
     helm.id = 'helm';
@@ -91,6 +146,14 @@ export class Hud {
     this.throttle = el('i');
     thr.append(this.throttle);
     helm.append(el('div', 'label', 'Speed'), line, el('div', 'label', 'Throttle'), thr);
+
+    this.prompt = el('div', 'panel');
+    this.prompt.id = 'prompt';
+    this.promptText = el('div');
+    const pbar = el('div', 'bar');
+    this.promptFill = el('i');
+    pbar.append(this.promptFill);
+    this.prompt.append(this.promptText, pbar);
 
     this.crosshair = el('div');
     this.crosshair.id = 'crosshair';
@@ -108,14 +171,15 @@ export class Hud {
       'screen',
       `<div class="card">
         <h1>SALT &amp; SCRAP</h1>
-        <p>The fleets are gone. The sea is full of wrecks and raiders.<br/>You have a leaky dinghy and a rusty machine gun.</p>
+        <p>The fleets are gone. The sea is full of wrecks and raiders.<br/>You have a leaky dinghy, a rusty machine gun and two deckhands.<br/>You work the first gun yourself; your crew man the rest, fish and make repairs.</p>
         <div class="controls">
-          <kbd>W / S</kbd><span>Throttle ahead / astern</span>
-          <kbd>A / D</kbd><span>Rudder</span>
-          <kbd>Mouse</kbd><span>Aim &mdash; <b>Click</b> to fire</span>
-          <kbd>1 – 4</kbd><span>Old MG · MG Mk II · Cannon · Harpoon</span>
-          <kbd>Right click</kbd><span>Cut harpoon line</span>
-          <kbd>R</kbd><span>Patch the boat between waves</span>
+          <kbd>W A S D</kbd><span>Throttle and rudder</span>
+          <kbd>Mouse</kbd><span>Aim &mdash; <b>click</b> to fire every manned gun</span>
+          <kbd>R</kbd><span>Send crew to repair everything (or click the damage diagram)</span>
+          <kbd>F</kbd><span>Hold on a fish school to fish for food and scrap</span>
+          <kbd>B</kbd><span>Build mode between waves: add hull, guns, engines, bunks</span>
+          <kbd>Enter</kbd><span>Start the next wave</span>
+          <kbd>Right click</kbd><span>Cut a harpoon line</span>
           <kbd>Wheel</kbd><span>Zoom · <kbd>Esc</kbd> pause · <kbd>M</kbd> mute</span>
         </div>
         <div class="cta">Click to set sail</div>
@@ -124,7 +188,8 @@ export class Hud {
     this.over = el('div', 'screen hidden');
     this.pause = el('div', 'screen hidden', `<div class="card"><h1>PAUSED</h1><p>Press <kbd>Esc</kbd> or click to resume</p></div>`);
 
-    this.root.append(status, wave, weapons, helm, this.layer, this.lead, this.hitmarker, this.crosshair, this.banner);
+    this.combatPanels = [helm, this.guns, this.crosshair, this.lead, this.hitmarker];
+    this.root.append(status, wave, this.guns, helm, this.prompt, this.layer, this.lead, this.hitmarker, this.crosshair, this.banner);
     parent.append(this.root, this.title, this.over, this.pause);
   }
 
@@ -132,10 +197,10 @@ export class Hud {
     this.root.style.display = v ? '' : 'none';
   }
 
-  showGameOver(wave: number, score: number, kills: number): void {
+  showGameOver(wave: number, score: number, kills: number, rescued: number): void {
     this.over.innerHTML = `<div class="card">
       <h2>SUNK</h2>
-      <p>Your boat went down on wave <b>${wave}</b>.<br/>${kills} enemy boat${kills === 1 ? '' : 's'} sent to the bottom · score <b>${score}</b></p>
+      <p>Your boat went down on wave <b>${wave}</b>.<br/>${kills} enemy boat${kills === 1 ? '' : 's'} sent to the bottom · ${rescued} sailor${rescued === 1 ? '' : 's'} rescued · score <b>${score}</b></p>
       <div class="cta">Click to try again</div>
     </div>`;
     this.over.classList.remove('hidden');
@@ -153,7 +218,7 @@ export class Hud {
     this.hitTimer = kill ? 0.35 : 0.12;
   }
 
-  popup(x: number, y: number, text: string, kind: Resource | 'score'): void {
+  popup(x: number, y: number, text: string, kind: LootKind | 'score' | 'food' | 'bad'): void {
     const p = el('div', `popup ${kind}`, text);
     p.style.left = `${x}px`;
     p.style.top = `${y}px`;
@@ -161,49 +226,52 @@ export class Hud {
     setTimeout(() => p.remove(), 1500);
   }
 
-  update(
-    dt: number,
-    opts: {
-      player: Boat | null;
-      weapon: WeaponId;
-      wood: number;
-      metal: number;
-      wave: number;
-      waveSub: string;
-      score: number;
-      mouseX: number;
-      mouseY: number;
-      canBear: boolean;
-      lead: { x: number; y: number } | null;
-      enemies: Boat[];
-      camera: Camera;
-      width: number;
-      height: number;
-    },
-  ): void {
-    const { player } = opts;
+  update(dt: number, s: HudState): void {
+    const { player } = s;
     this.hitTimer -= dt;
     if (this.hitTimer <= 0) this.hitmarker.style.opacity = '0';
     this.bannerTimer -= dt;
     if (this.bannerTimer <= 0) this.banner.style.opacity = '0';
+    for (const p of this.combatPanels) p.style.visibility = s.building ? 'hidden' : '';
 
-    this.crosshair.style.left = this.hitmarker.style.left = `${opts.mouseX}px`;
-    this.crosshair.style.top = this.hitmarker.style.top = `${opts.mouseY}px`;
-    this.crosshair.classList.toggle('blocked', !opts.canBear);
+    this.crosshair.style.left = this.hitmarker.style.left = `${s.mouseX}px`;
+    this.crosshair.style.top = this.hitmarker.style.top = `${s.mouseY}px`;
+    this.crosshair.classList.toggle('blocked', !s.canBear);
 
-    if (opts.lead) {
+    if (s.lead) {
       this.lead.style.display = 'block';
-      this.lead.style.left = `${opts.lead.x}px`;
-      this.lead.style.top = `${opts.lead.y}px`;
+      this.lead.style.left = `${s.lead.x}px`;
+      this.lead.style.top = `${s.lead.y}px`;
     } else this.lead.style.display = 'none';
 
-    this.wood.textContent = String(opts.wood);
-    this.metal.textContent = String(opts.metal);
-    this.waveNum.textContent = opts.wave > 0 ? String(opts.wave) : '—';
-    this.waveSub.textContent = opts.waveSub;
-    this.score.textContent = opts.score.toLocaleString();
+    this.wood.textContent = String(Math.floor(s.wood));
+    this.metal.textContent = String(Math.floor(s.metal));
+    this.food.textContent = String(Math.floor(s.crew.food));
+    this.food.classList.toggle('warn', s.crew.food <= s.crew.count);
+    const c = s.crew;
+    this.crewLine.innerHTML = `<b>${c.count}</b> crew · <b>${c.berths}</b> bunks`;
+    this.crewNote.textContent = c.starving
+      ? 'Starving: work is slow, hands will desert'
+      : c.recruitEta !== null
+        ? `A drifter signs on in ${Math.ceil(c.recruitEta)}s`
+        : c.count >= c.berths
+          ? 'Bunks full · build a bunk cabin for more crew'
+          : 'Need 4 food to take on a drifter';
+    this.crewNote.classList.toggle('warn', c.starving);
+    this.waveNum.textContent = s.wave > 0 ? String(s.wave) : '—';
+    this.waveSub.textContent = s.waveSub;
+    this.score.textContent = s.score.toLocaleString();
+
+    if (s.prompt) {
+      this.prompt.style.display = 'block';
+      this.promptText.innerHTML = s.prompt.text;
+      const bar = this.promptFill.parentElement!;
+      bar.style.display = s.prompt.progress === undefined ? 'none' : 'block';
+      this.promptFill.style.width = `${Math.round((s.prompt.progress ?? 0) * 100)}%`;
+    } else this.prompt.style.display = 'none';
 
     if (player) {
+      this.lastPlayer = player;
       this.boatName.textContent = player.design.name;
       const hull = player.stats.hullIntegrity;
       this.hullFill.style.width = `${Math.round(hull * 100)}%`;
@@ -213,40 +281,22 @@ export class Hud {
       const t = player.helm.throttle;
       this.throttle.style.left = t >= 0 ? '50%' : `${50 + t * 50}%`;
       this.throttle.style.width = `${Math.abs(t) * 50}%`;
-
-      const turret = player.turrets[0];
-      PLAYER_WEAPON_ORDER.forEach((id, i) => {
-        const s = this.slots[i];
-        const active = id === opts.weapon;
-        s.root.classList.toggle('active', active);
-        if (!active || !turret) {
-          s.fill.style.width = '100%';
-          s.state.textContent = '';
-          s.bar.classList.remove('hot');
-          return;
-        }
-        const w = turret.weapon;
-        const hot = w.def.heatPerShot > 0;
-        s.bar.classList.toggle('hot', hot);
-        s.fill.style.width = `${Math.round((hot ? 1 - w.heat : w.readiness) * 100)}%`;
-        s.state.textContent = w.jammed ? 'JAMMED' : w.overheated ? 'OVERHEATED' : turret.harpoonOut ? 'LINE OUT' : '';
-      });
-      if (!turret) this.slots.forEach((s) => (s.state.textContent = 'GUN LOST'));
-
-      const r = turret && turret.def.fireInterval > 1 ? turret.weapon.readiness : 1;
+      this.updateGuns(player);
+      const slow = player.turrets.find((tt) => tt.def.fireInterval > 1);
+      const r = slow ? slow.weapon.readiness : 1;
       this.reload.style.background = r < 1 ? `conic-gradient(rgba(242,193,78,0.8) ${r * 360}deg, transparent 0)` : 'none';
       this.reload.style.mask = 'radial-gradient(circle, transparent 58%, #000 60%)';
-      this.drawSchematic(player);
+      this.drawSchematic(player, s.jobStatus);
     }
 
     // Enemy health bars.
     for (const [boat, bar] of this.bars) {
-      if (!opts.enemies.includes(boat) || !boat.alive) {
+      if (!s.enemies.includes(boat) || !boat.alive) {
         bar.remove();
         this.bars.delete(boat);
       }
     }
-    for (const boat of opts.enemies) {
+    for (const boat of s.enemies) {
       if (!boat.alive) continue;
       let bar = this.bars.get(boat);
       if (!bar) {
@@ -256,16 +306,57 @@ export class Hud {
       }
       boat.centerWorld(_v);
       _v.y += 3.2;
-      _v.project(opts.camera);
+      _v.project(s.camera);
       const onScreen = _v.z < 1 && Math.abs(_v.x) < 1.1 && Math.abs(_v.y) < 1.1;
       bar.style.display = onScreen ? 'block' : 'none';
-      bar.style.left = `${((_v.x + 1) / 2) * opts.width}px`;
-      bar.style.top = `${((1 - _v.y) / 2) * opts.height}px`;
+      bar.style.left = `${((_v.x + 1) / 2) * s.width}px`;
+      bar.style.top = `${((1 - _v.y) / 2) * s.height}px`;
       (bar.firstChild as HTMLElement).style.width = `${Math.round(boat.stats.hullIntegrity * 100)}%`;
     }
   }
 
-  private drawSchematic(boat: Boat): void {
+  /** One row per mounted gun: name, heat or reload, and whether anyone is manning it. */
+  private updateGuns(player: Boat): void {
+    const turrets = player.turrets;
+    const key = turrets.map((t) => `${t.part.index}:${t.def.id}`).join('|');
+    if (key !== this.gunKey) {
+      this.gunKey = key;
+      this.guns.innerHTML = '';
+      this.gunRows = turrets.slice(0, 8).map((t) => {
+        const row = el('div', 'slot');
+        row.append(el('span', 'wname', t.def.name));
+        const bar = el('div', 'bar');
+        const fill = el('i');
+        bar.append(fill);
+        const state = el('div', 'state');
+        row.append(bar, state);
+        this.guns.append(row);
+        return { fill, bar, state };
+      });
+      if (!turrets.length) this.guns.append(el('div', 'slot active', '<span class="wname">No guns</span><div class="state">Build a mount (B)</div>'));
+    }
+    turrets.slice(0, 8).forEach((t, i) => {
+      const row = this.gunRows[i];
+      const w = t.weapon;
+      const hot = w.def.heatPerShot > 0;
+      row.bar.classList.toggle('hot', hot);
+      row.fill.style.width = `${Math.round((hot ? 1 - w.heat : w.readiness) * 100)}%`;
+      row.state.textContent = !t.manned ? 'NO GUNNER' : w.jammed ? 'JAMMED' : w.overheated ? 'OVERHEATED' : t.harpoonOut ? 'LINE OUT' : !t.canBear ? 'OUT OF ARC' : '';
+      row.state.parentElement!.classList.toggle('active', t.manned);
+    });
+  }
+
+  private partAt(x: number, y: number): PartInstance | null {
+    const boat = this.lastPlayer;
+    if (!boat) return null;
+    const { ox, oy, cell } = this.layout;
+    const hits = boat.parts.filter((p) => Math.abs(ox + p.x * cell - x) <= cell / 2 && Math.abs(oy - p.z * cell - y) <= cell / 2);
+    if (!hits.length) return null;
+    // Prefer the block that most needs attention, deck gear over hull on a tie.
+    return hits.sort((a, b) => a.hp / a.def.hp - b.hp / b.def.hp || b.y - a.y)[0];
+  }
+
+  private drawSchematic(boat: Boat, jobStatus: (p: PartInstance) => JobStatus | null): void {
     const c = this.schematic;
     const g = c.getContext('2d')!;
     g.clearRect(0, 0, c.width, c.height);
@@ -275,39 +366,47 @@ export class Hud {
     const maxX = Math.max(...xs) + 0.5;
     const minZ = Math.min(...zs) - 0.5;
     const maxZ = Math.max(...zs) + 0.5;
-    const cell = Math.min((c.width - 20) / (maxX - minX), (c.height - 20) / (maxZ - minZ), 28);
+    const cell = Math.min((c.width - 16) / (maxX - minX), (c.height - 16) / (maxZ - minZ), 30);
     const ox = c.width / 2 - ((minX + maxX) / 2) * cell;
     const oy = c.height / 2 + ((minZ + maxZ) / 2) * cell;
+    this.layout = { ox, oy, cell };
+    const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 150);
     const sorted = [...boat.parts].sort((a, b) => a.y - b.y);
     for (const p of sorted) {
       const x = ox + p.x * cell;
       const y = oy - p.z * cell;
       const f = p.hp / p.def.hp;
       const upper = p.y > 0;
-      const size = upper ? cell * 0.62 : cell - 2;
+      const size = upper ? cell * (0.66 - (p.y - 1) * 0.12) : cell - 2;
       if (!p.alive) {
-        g.strokeStyle = 'rgba(224,73,58,0.8)';
+        g.strokeStyle = 'rgba(224,73,58,0.85)';
         g.setLineDash([3, 2]);
         g.strokeRect(x - size / 2, y - size / 2, size, size);
         g.setLineDash([]);
-        continue;
+      } else {
+        g.fillStyle = `hsla(${f * 110}, 70%, ${upper ? 55 : 42}%, ${upper ? 0.95 : 0.85})`;
+        g.fillRect(x - size / 2, y - size / 2, size, size);
+        if (upper) {
+          g.fillStyle = 'rgba(0,0,0,0.6)';
+          g.font = `bold ${Math.max(8, cell * 0.34)}px Chakra Petch, sans-serif`;
+          g.textAlign = 'center';
+          g.textBaseline = 'middle';
+          const letter = { mount: 'G', engine: 'E', armor: 'A', quarters: 'B', crane: 'N', cabin: 'W', hull: 'H' }[p.def.kind];
+          g.fillText(letter, x, y + 1);
+        }
+        if (boat.fires.has(p.index)) {
+          g.fillStyle = `rgba(255,${120 + pulse * 80},40,0.95)`;
+          g.beginPath();
+          g.arc(x + size / 2 - 3, y - size / 2 + 3, 3, 0, Math.PI * 2);
+          g.fill();
+        }
       }
-      const hue = f * 110;
-      g.fillStyle = `hsla(${hue}, 70%, ${upper ? 55 : 42}%, ${upper ? 0.95 : 0.85})`;
-      g.fillRect(x - size / 2, y - size / 2, size, size);
-      if (boat.fires.has(p.index)) {
-        g.fillStyle = 'rgba(255,140,40,0.9)';
-        g.beginPath();
-        g.arc(x, y, 3, 0, Math.PI * 2);
-        g.fill();
-      }
-      if (upper) {
-        g.fillStyle = 'rgba(0,0,0,0.55)';
-        g.font = `bold ${Math.max(8, cell * 0.36)}px Chakra Petch, sans-serif`;
-        g.textAlign = 'center';
-        g.textBaseline = 'middle';
-        const letter = p.def.kind === 'mount' ? 'G' : p.def.kind === 'engine' ? 'E' : p.def.kind === 'armor' ? 'A' : 'C';
-        g.fillText(letter, x, y + 1);
+      const job = jobStatus(p);
+      if (job) {
+        g.lineWidth = 2;
+        g.strokeStyle = job === 'working' ? `rgba(242,193,78,${0.5 + pulse * 0.5})` : job === 'waiting' ? 'rgba(244,236,216,0.7)' : 'rgba(224,73,58,0.95)';
+        g.strokeRect(x - size / 2 - 1, y - size / 2 - 1, size + 2, size + 2);
+        g.lineWidth = 1;
       }
     }
   }

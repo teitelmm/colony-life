@@ -2,7 +2,9 @@
 
 A 3D top-down boat battle game in the browser, built with Three.js, TypeScript and Vite. You start in a leaky dinghy with an old machine gun on the bow and fight waves of raiders on a smoky, war-torn sea.
 
-This is **phase 1: core combat**. It covers sailing, the four starter weapons, enemy boats, and the water, damage and explosion effects. Build mode, the gun workshop, fishing, crew and crew repairs come in phase 2. The systems below were designed so those can plug in.
+The game has two phases so far:
+- **Phase 1** added sailing, the four starter weapons, enemy boats, and the water, damage and explosion effects.
+- **Phase 2** added a Trailmakers-style 3D build mode, a gun workshop, fishing, crew and bunk cabins, and crew-driven repairs.
 
 ## Running it
 
@@ -20,13 +22,26 @@ npm test         # unit tests (vitest)
 | **W / S** | Throttle ahead / astern |
 | **A / D** | Rudder |
 | **Mouse** | Aim (the diamond marks where to lead a moving target) |
-| **Left click** | Fire |
-| **1 – 4** | Old MG · MG Mk II · Deck Cannon · Harpoon |
-| **Right click** | Cut the harpoon line |
-| **R** | Patch the boat between waves (costs wood/metal) |
-| **Enter** | Start the next wave early |
+| **Left click** | Fire every manned gun |
+| **R** | Send crew to repair everything that's damaged |
+| **Click the damage diagram** | Order (or cancel) a repair on one block |
+| **F (hold)** | Fish while stopped on a school (look for gulls and dark water) |
+| **B** | Build mode, between waves only |
+| **Enter** | Start the next wave now |
+| **Right click** | Cut a harpoon line |
 | **Wheel** | Zoom |
 | **Esc / M** | Pause / mute |
+
+In build mode:
+
+| Input | Action |
+| --- | --- |
+| **Click** | Add the selected block against the face under the cursor |
+| **Right-click** | Remove a block (half its materials come back) |
+| **Right-drag, or Q / E** | Orbit the camera |
+| **1 – 0** | Pick a part |
+| **R** | Cycle a gun's facing |
+| **Workshop** | Opens from the gun picker |
 
 ## What's in phase 1
 
@@ -39,7 +54,7 @@ npm test         # unit tests (vitest)
   - **Harpoon:** a rope tether that winches the target in.
 - **Turrets.** Each turret has a traverse speed and a firing arc, and solves its own ballistic elevation.
 - **Enemies.** Four types: Raider Skiff, Harpoon Runner, Gunboat and Armoured Barge. Their AI closes to its preferred gun range, circles, fires in bursts with leading (imperfect) aim, avoids rocks and allies, and breaks off when badly hurt. Waves escalate indefinitely.
-- **Salvage.** Wrecks drop floating wood and metal crates. Between waves, **R** spends them to patch damaged parts and rebuild destroyed ones. This is a stand-in until crew-driven repairs arrive in phase 2.
+- **Salvage.** Wrecks drop floating wood and metal crates; sail through them to collect materials for building and repairs.
 - **Effects:**
   - **Ocean:** Gerstner waves, fresnel sky reflection, subsurface tint, sun glitter and crest foam.
   - **Foam map:** a world-space map projects wakes, hull foam, splash rings and oil slicks onto the moving wave surface.
@@ -53,19 +68,43 @@ npm test         # unit tests (vitest)
 src/
   core/      Game loop (fixed 60 Hz sim), input
   boat/      Part catalogue, designs, stats/damage (pure), physics, meshes, Boat entity
-  weapons/   Weapon defs, firing state (pure), ballistics (pure), turrets, projectiles, harpoon
+  weapons/   Weapon defs and registry, workshop recipes (pure), firing state, ballistics, turrets, projectiles, harpoon
   world/     Waves (shared CPU/GPU), ocean shader, sky, islands/wrecks/scenery
   fx/        Particles, foam map, wakes, light flashes, effect recipes
   ai/        Enemy captain
-  game/      Waves of enemies, loot, debris, shared World interface
+  game/      Waves of enemies, loot and survivors, debris, crew (pure), repairs, fishing, World
+  build/     Build rules (pure: placement, removal, costs, performance) and the 3D build mode
   render/    Camera rig, post-processing, procedural textures
-  ui/        DOM HUD
-tests/       Unit tests for waves, ballistics, weapon state, boat stats/physics, hit tests
+  ui/        DOM HUD, build palette, gun workshop
+tests/       Unit tests for waves, ballistics, weapons, boat stats/physics, hit tests, build rules, crew, workshop
 ```
 
-## Phase 2 hooks
+## What's in phase 2
 
-- **Build mode.** Boats are already `BoatDesign` lists of `{ part, x, y, z, weapon }`. A Trailmakers-style orbit builder only needs to edit that list. `findDetached` already enforces structural connectivity.
-- **Gun workshop.** A custom gun is a new `WeaponDef` built from a base type plus stat parts.
-- **Crew repairs.** Parts carry `material` and a wood/metal `cost`, and the HUD schematic already shows per-part damage. Crew can be sent to specific parts instead of the current between-wave patch.
-- **Bedrooms and crew.** Add a `bedroom` part kind. Crew count can then gate how many guns you can man and how fast repairs go.
+- **Build mode.** Build between waves.
+  - Orbit the boat and point at any face of any block to see a green or red ghost of the next block, then click to bolt it on.
+  - Hull goes on the waterline; engines, guns, armour, cabins, bunks and net cranes go on deck, stacked up to three levels.
+  - A block is refused, with the reason shown, if it would float free, overlap another block, exceed the size limit (8 m × 14 m), cut other blocks loose, or cost more than you have.
+  - The live stats panel shows top speed, spare buoyancy, displacement, guns, bunks and armour.
+  - Every edit rebuilds the real boat, so it floats and handles in the water as you build.
+- **Gun workshop.** A custom gun is a base plus one choice for each part:
+  - Base: machine gun, cannon or harpoon.
+  - Barrel: short, standard or long.
+  - Receiver: light, standard or heavy.
+  - Ammo: ball, armour-piercing, incendiary or high-explosive.
+  - Cooling (machine guns only): none, water jacket or fins.
+
+  The workshop compares your design's stats against the stock gun. Saved designs appear in the gun picker and are kept in your browser.
+- **Crew and bunks.**
+  - You man the first gun yourself. Every other gun needs a gunner, or it holds fire.
+  - The boat sleeps two; each bunk cabin adds two more.
+  - Empty bunks attract a drifter every ~35 s if you have 4 food to spare.
+  - Survivors from sunk enemy boats float in life rings. Sail through them to take them aboard if a bunk is free.
+  - Everyone eats one food a minute. A starving crew works slowly and eventually deserts.
+  - A gunner or repairer is killed if the block they're on is shot away.
+- **Repairs.**
+  - Press **R**, or click a block on the damage diagram, to send a crew member.
+  - Crew put out fires, patch damage and rebuild blocks that were shot away, paying wood or metal by the block's material.
+  - Repair orders take crew before guns do, so patching up mid-fight can silence your guns. That's the trade-off.
+- **Fishing.** Fish schools appear as dark, restless water with gulls wheeling overhead. Stop on one and hold **F** to haul in food; now and then the net brings up wood or scrap metal too. A net crane makes hauls 50% faster, and an idle crew member doubles the rate.
+

@@ -1,13 +1,25 @@
 /**
- * Data-driven weapon stats. Every gun in the game is a WeaponDef, so the
- * phase-2 gun workshop can build new ones by combining a base with parts.
+ * Data-driven weapon stats. Every gun in the game is a WeaponDef; the gun
+ * workshop builds new ones from a base plus parts and registers them here.
  */
 
 export type ProjectileKind = 'bullet' | 'shell' | 'harpoon';
-export type WeaponId = 'mg_old' | 'mg_new' | 'cannon' | 'harpoon';
+export type BuiltinWeaponId = 'mg_old' | 'mg_new' | 'cannon' | 'harpoon';
+/** built-in ids plus workshop designs ("custom_…") */
+export type WeaponId = string;
+/** which model (and sound) a weapon uses */
+export type WeaponRigId = BuiltinWeaponId;
 
 export interface WeaponDef {
   id: WeaponId;
+  rig: WeaponRigId;
+  /** barrel length multiplier for the model */
+  barrelScale: number;
+  /** chance per hit to set the struck part alight */
+  incendiary: number;
+  /** cost to fit on a mount */
+  cost: { wood: number; metal: number };
+  custom?: boolean;
   name: string;
   kind: ProjectileKind;
   /** seconds between shots */
@@ -45,9 +57,13 @@ export interface WeaponDef {
 
 const deg = (d: number) => (d * Math.PI) / 180;
 
-export const WEAPONS: Record<WeaponId, WeaponDef> = {
+export const WEAPONS: Record<BuiltinWeaponId, WeaponDef> = {
   mg_old: {
     id: 'mg_old',
+    rig: 'mg_old',
+    barrelScale: 1,
+    incendiary: 0,
+    cost: { wood: 0, metal: 4 },
     name: 'Old Machine Gun',
     kind: 'bullet',
     fireInterval: 0.12,
@@ -71,6 +87,10 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
   },
   mg_new: {
     id: 'mg_new',
+    rig: 'mg_new',
+    barrelScale: 1,
+    incendiary: 0,
+    cost: { wood: 0, metal: 10 },
     name: 'Machine Gun Mk II',
     kind: 'bullet',
     fireInterval: 0.07,
@@ -94,6 +114,10 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
   },
   cannon: {
     id: 'cannon',
+    rig: 'cannon',
+    barrelScale: 1,
+    incendiary: 0,
+    cost: { wood: 2, metal: 14 },
     name: 'Deck Cannon',
     kind: 'shell',
     fireInterval: 2.1,
@@ -117,6 +141,10 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
   },
   harpoon: {
     id: 'harpoon',
+    rig: 'harpoon',
+    barrelScale: 1,
+    incendiary: 0,
+    cost: { wood: 4, metal: 6 },
     name: 'Harpoon Launcher',
     kind: 'harpoon',
     fireInterval: 3,
@@ -140,4 +168,28 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
   },
 };
 
-export const PLAYER_WEAPON_ORDER: WeaponId[] = ['mg_old', 'mg_new', 'cannon', 'harpoon'];
+export const BUILTIN_WEAPONS: BuiltinWeaponId[] = ['mg_old', 'mg_new', 'cannon', 'harpoon'];
+
+const custom = new Map<string, WeaponDef>();
+
+/** Look up any weapon, built-in or workshop-made. Unknown ids fall back to the old MG. */
+export function getWeapon(id: WeaponId): WeaponDef {
+  return (WEAPONS as Record<string, WeaponDef>)[id] ?? custom.get(id) ?? WEAPONS.mg_old;
+}
+
+export function registerWeapon(def: WeaponDef): void {
+  custom.set(def.id, def);
+}
+
+export function unregisterWeapon(id: string): void {
+  custom.delete(id);
+}
+
+export function customWeapons(): WeaponDef[] {
+  return [...custom.values()];
+}
+
+/** Every weapon that can be fitted in the builder. */
+export function allWeapons(): WeaponDef[] {
+  return [...BUILTIN_WEAPONS.map((id) => WEAPONS[id]), ...customWeapons()];
+}

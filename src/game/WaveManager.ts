@@ -89,14 +89,15 @@ export type WavePhase = 'intermission' | 'combat';
 export class WaveManager {
   wave = 0;
   phase: WavePhase = 'intermission';
-  timer = 4;
+  /** time to fish, build and get ready before the first raiders */
+  timer = 45;
 
   /** Returns the composition to spawn when a new wave starts. */
   update(dt: number, enemiesAlive: number, skip: boolean): Key[] | null {
     if (this.phase === 'combat') {
       if (enemiesAlive === 0) {
         this.phase = 'intermission';
-        this.timer = 20;
+        this.timer = 40;
       }
       return null;
     }

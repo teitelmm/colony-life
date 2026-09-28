@@ -158,8 +158,9 @@ export class ProjectileSystem {
     const def = p.def;
     const wasAlive = boat.alive;
     const destroyed = boat.damage(part, def.damage * p.owner.damageScale, def.penetration, world, p.owner, at);
-    if (def.kind === 'shell') {
-      world.effects.explosion(at, 0.75);
+    if (def.incendiary > 0 && part.alive && Math.random() < def.incendiary) boat.ignite(part);
+    if (def.kind === 'shell' || def.splashRadius > 0) {
+      world.effects.explosion(at, def.kind === 'shell' ? 0.75 : 0.25, false);
       for (const b of world.boats) if (b.state !== 'gone') b.splash(at, def.splashRadius, def.splashDamage * p.owner.damageScale, def.penetration * 0.5, world, p.owner);
     } else {
       world.effects.hit(at, part.def.material, def.kind === 'harpoon' ? 2 : 1);

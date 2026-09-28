@@ -15,6 +15,8 @@ export interface PartInstance {
   hp: number;
   alive: boolean;
   weapon?: WeaponId;
+  /** gun facing in quarter turns (mounts only) */
+  facing?: number;
 }
 
 export interface BoatStats {
@@ -35,7 +37,15 @@ export interface BoatStats {
   centerX: number;
   centerZ: number;
   radius: number;
+  /** crew beds (the boat itself always sleeps two) */
+  berths: number;
+  /** fishing catch-rate bonus */
+  fishing: number;
+  guns: number;
 }
+
+/** Every boat sleeps two before any bunk cabins are added. */
+export const BASE_BERTHS = 2;
 
 /** Hull cells keep some buoyancy while damaged, scaled down as they take on water. */
 export function effectiveBuoyancy(p: PartInstance): number {
@@ -54,6 +64,9 @@ export function computeStats(parts: PartInstance[]): BoatStats {
   let hullCells = 0;
   let hullHp = 0;
   let hullHpMax = 0;
+  let berths = BASE_BERTHS;
+  let fishing = 0;
+  let guns = 0;
   let minX = Infinity;
   let maxX = -Infinity;
   let minZ = Infinity;
@@ -67,6 +80,9 @@ export function computeStats(parts: PartInstance[]): BoatStats {
     cy += p.y * p.def.mass;
     cz += p.z * p.def.mass;
     thrust += p.def.thrust;
+    berths += p.def.berths;
+    fishing += p.def.fishing;
+    if (p.def.kind === 'mount' && p.weapon) guns++;
     buoyancy += effectiveBuoyancy(p);
     if (p.def.kind === 'hull') {
       hullCells++;
@@ -92,6 +108,9 @@ export function computeStats(parts: PartInstance[]): BoatStats {
       centerX: 0,
       centerZ: 0,
       radius: 0.5,
+      berths: BASE_BERTHS,
+      fishing: 0,
+      guns: 0,
     };
   }
 
@@ -130,6 +149,9 @@ export function computeStats(parts: PartInstance[]): BoatStats {
     centerX: (minX + maxX) / 2,
     centerZ: (minZ + maxZ) / 2,
     radius: Math.hypot(halfWidth, halfLength),
+    berths,
+    fishing,
+    guns,
   };
 }
 

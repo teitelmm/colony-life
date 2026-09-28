@@ -35,6 +35,10 @@ export interface PartVisual {
   prop?: Object3D;
   /** flag cloth to animate */
   flag?: Mesh;
+  /** stove chimney (bunk cabins) */
+  chimney?: Object3D;
+  /** swinging net (cranes) */
+  net?: Object3D;
 }
 
 interface Ctx {
@@ -188,6 +192,53 @@ export function buildPartVisual(part: PartInstance, ctx: Ctx): PartVisual {
       flag.rotation.y = Math.PI / 2;
       flag.castShadow = false;
       visual.flag = flag;
+      break;
+    }
+
+    case 'quarters': {
+      const walls = track(std(0xffffff, { map: deckTexture(false), roughness: 0.9 }));
+      const roof = track(std(design.paint, { map: tarpTexture(design.paint), roughness: 0.95 }));
+      const dark = track(std(0x1c2226, { roughness: 0.3, metalness: 0.5 }));
+      const brass = track(std(0xb08a3e, { roughness: 0.4, metalness: 0.8 }));
+      add(group, new BoxGeometry(0.92, 0.62, 0.9), walls, 0, DECK_LOCAL + 0.31, 0);
+      // Pitched tarp roof.
+      const r1 = add(group, new BoxGeometry(0.56, 0.05, 0.98), roof, -0.22, DECK_LOCAL + 0.72, 0);
+      r1.rotation.z = 0.5;
+      const r2 = add(group, new BoxGeometry(0.56, 0.05, 0.98), roof, 0.22, DECK_LOCAL + 0.72, 0);
+      r2.rotation.z = -0.5;
+      for (const sx of [-0.47, 0.47]) {
+        const port = add(group, new CylinderGeometry(0.1, 0.1, 0.04, 10), brass, sx, DECK_LOCAL + 0.38, 0);
+        port.rotation.z = Math.PI / 2;
+        const glass = add(group, new CylinderGeometry(0.07, 0.07, 0.05, 10), dark, sx, DECK_LOCAL + 0.38, 0);
+        glass.rotation.z = Math.PI / 2;
+      }
+      add(group, new BoxGeometry(0.3, 0.46, 0.03), dark, 0, DECK_LOCAL + 0.23, 0.46);
+      add(group, new CylinderGeometry(0.04, 0.05, 0.5, 6), dark, 0.25, DECK_LOCAL + 0.95, -0.25);
+      visual.chimney = new Object3D();
+      visual.chimney.position.set(0.25, DECK_LOCAL + 1.22, -0.25);
+      group.add(visual.chimney);
+      break;
+    }
+
+    case 'crane': {
+      const wood = track(std(0x7a5534, { roughness: 0.9 }));
+      const iron = track(std(0x2e3336, { roughness: 0.5, metalness: 0.6 }));
+      add(group, new CylinderGeometry(0.07, 0.09, 1.4, 6), wood, 0, DECK_LOCAL + 0.7, 0);
+      add(group, new CylinderGeometry(0.16, 0.2, 0.12, 8), iron, 0, DECK_LOCAL + 0.06, 0);
+      const boom = new Group();
+      boom.position.set(0, DECK_LOCAL + 1.25, 0);
+      const arm = add(boom, new BoxGeometry(0.07, 0.07, 1.4), wood, 0, 0, 0.6);
+      arm.rotation.x = -0.25;
+      const netMat = track(std(0x9a8a62, { roughness: 1, wireframe: true }));
+      const net = new Group();
+      net.position.set(0, -0.1, 1.25);
+      add(net, new CylinderGeometry(0.01, 0.01, 0.8, 3), iron, 0, -0.4, 0);
+      const bag = add(net, new SphereGeometry(0.28, 8, 6), netMat, 0, -0.9, 0);
+      bag.scale.y = 1.3;
+      bag.castShadow = false;
+      boom.add(net);
+      group.add(boom);
+      visual.net = boom;
       break;
     }
   }

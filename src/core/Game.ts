@@ -35,13 +35,23 @@ import { Hud } from '../ui/Hud';
 import { HarpoonSystem } from '../weapons/Harpoon';
 import { ProjectileSystem } from '../weapons/Projectiles';
 import { leadTarget } from '../weapons/ballistics';
-import { PLAYER_WEAPON_ORDER, WEAPONS, type WeaponId } from '../weapons/weaponDefs';
 import { ENV } from '../world/environment';
 import { Ocean } from '../world/Ocean';
 import { Scenery } from '../world/Scenery';
 import { createSky } from '../world/Sky';
 import { GRAVITY, sampleHeight } from '../world/waves';
 import { Input } from './Input';
+import type { BoatDesign } from '../boat/parts';
+import type { PartInstance } from '../boat/BoatStats';
+import { BuildMode } from '../build/BuildMode';
+import { BuildHud } from '../ui/BuildHud';
+import { Workshop, loadSavedGuns } from '../ui/Workshop';
+import { Crew, assignCrew, type Assignment } from '../game/Crew';
+import { Repairs } from '../game/Repairs';
+import { Fishing, MAX_FISHING_SPEED } from '../game/Fishing';
+import type { Prompt } from '../ui/Hud';
+
+const START = { wood: 24, metal: 14, food: 12, crew: 2 };
 
 const STEP = 1 / 60;
 type GameState = 'title' | 'playing' | 'paused' | 'over';
@@ -67,11 +77,17 @@ export class Game {
   private state: GameState = 'title';
   private waves = new WaveManager();
   private ais: EnemyAI[] = [];
-  private weapon: WeaponId = 'mg_old';
-  private wood = 10;
-  private metal = 5;
+  private readonly res = { wood: START.wood, metal: START.metal };
+  private crew = new Crew(START.crew, START.food);
+  private assignment: Assignment = { repairers: 0, gunners: 0, fisher: false, idle: 0 };
+  private readonly repairs = new Repairs();
+  private readonly fishing: Fishing;
+  private readonly build: BuildMode;
+  private readonly buildHud: BuildHud;
+  private readonly workshop: Workshop;
   private score = 0;
   private kills = 0;
+  private rescued = 0;
   private overTimer = 0;
   private accumulator = 0;
   private last = performance.now();
@@ -163,15 +179,50 @@ export class Game {
       },
     };
     loot.onCollect = (kind, amount, at) => {
-      if (kind === 'wood') this.wood += amount;
-      else this.metal += amount;
       const s = this.toScreen(at);
+      if (kind === 'survivor') {
+        const player = this.world.player!;
+        if (!this.crew.join(player.stats.berths)) {
+          if (s) this.hud.popup(s.x, s.y, 'NO FREE BUNK', 'bad');
+          return false;
+        }
+        this.rescued++;
+        if (s) this.hud.popup(s.x, s.y, '+1 CREW', 'survivor');
+        return true;
+      }
+      this.res[kind] += amount;
       if (s) this.hud.popup(s.x, s.y, `+${amount} ${kind.toUpperCase()}`, kind);
+      return true;
     };
+    this.hud.onSchematicClick = (part) => this.orderRepair(part);
+
+    this.fishing = new Fishing(scene);
+    loadSavedGuns();
 
     this.post = new PostFX(renderer, scene, this.rig.camera);
     this.post.setSize(window.innerWidth, window.innerHeight, renderer.getPixelRatio());
     this.input = new Input(renderer.domElement);
+
+    this.build = new BuildMode({
+      world: this.world,
+      camera: this.rig.camera,
+      input: this.input,
+      wallet: () => this.res,
+      pay: (c) => {
+        this.res.wood -= c.wood;
+        this.res.metal -= c.metal;
+      },
+      rebuild: (d) => this.replacePlayer(d),
+      onChange: () => this.buildHud.refresh(this.res),
+    });
+    this.buildHud = new BuildHud(document.body, this.build);
+    this.buildHud.onDone = () => this.toggleBuild();
+    this.workshop = new Workshop(document.body);
+    this.buildHud.onWorkshop = () => this.workshop.open();
+    this.workshop.onSaved = (def) => {
+      this.build.selectWeapon(def.id);
+      this.hud.message('DESIGN SAVED', `${def.name} is ready to fit to a mount`, 2.5);
+    };
 
     window.addEventListener('resize', () => this.resize());
     this.hud.title.addEventListener('click', () => this.begin());
@@ -191,8 +242,72 @@ export class Game {
     this.world.scene.add(boat.group);
     this.world.boats.push(boat);
     this.world.player = boat;
-    this.weapon = 'mg_old';
+    this.hookPlayer(boat);
     this.rig.snap(boat.body.origin);
+  }
+
+  /** Crew at a gun or on a repair die when that block is blown away. */
+  private hookPlayer(boat: Boat): void {
+    boat.onPartDestroyed = (part: PartInstance) => {
+      let lost = 0;
+      const gun = boat.turrets.find((t) => t.part === part);
+      // The captain at the first gun ducks; a gunner at any other gun is lost with it.
+      if (gun?.manned && gun !== boat.turrets[0]) lost++;
+      if (this.repairs.onDestroyed(part, this.assignment.repairers)) lost++;
+      if (!lost || !boat.alive) return;
+      this.crew.lose(lost);
+      boat.body.localToWorld(_w.set(part.x, part.y, part.z), _w);
+      const s = this.toScreen(_w);
+      if (s) this.hud.popup(s.x, s.y - 20, lost > 1 ? `${lost} CREW LOST` : 'CREW LOST', 'bad');
+    };
+  }
+
+  /** Swap the player's boat for a rebuilt one in the same spot (build mode). */
+  private replacePlayer(design: BoatDesign): Boat {
+    const w = this.world;
+    const old = w.player!;
+    const boat = new Boat(design, 'player', w);
+    boat.body.origin.copy(old.body.origin);
+    boat.body.quat.copy(old.body.quat);
+    boat.body.vel.copy(old.body.vel);
+    boat.body.angVel.copy(old.body.angVel);
+    boat.syncGroup();
+    old.dispose(w);
+    w.boats[w.boats.indexOf(old)] = boat;
+    w.player = boat;
+    w.scene.add(boat.group);
+    this.hookPlayer(boat);
+    this.repairs.clear();
+    return boat;
+  }
+
+  private toggleBuild(): void {
+    const w = this.world;
+    const player = w.player;
+    if (this.build.active) {
+      this.build.exit();
+      this.workshop.close();
+      this.buildHud.show(false);
+      document.body.classList.remove('building');
+      this.hud.message('LAUNCHED', `${player?.stats.guns ?? 0} gun${player?.stats.guns === 1 ? '' : 's'} · ${this.crew.count} crew aboard`, 2);
+      return;
+    }
+    if (this.state !== 'playing' || !player?.alive) return;
+    if (this.waves.phase !== 'intermission' || w.boats.some((b) => b.team === 'enemy' && b.alive)) {
+      this.hud.message('NOT NOW', 'You can only build between waves', 1.5);
+      return;
+    }
+    this.build.enter();
+    this.buildHud.show(true);
+    this.buildHud.refresh(this.res);
+    document.body.classList.add('building');
+  }
+
+  private orderRepair(part: PartInstance): void {
+    const player = this.world.player;
+    if (!player?.alive || this.build.active) return;
+    const on = this.repairs.toggle(player, part);
+    if (on && this.crew.count === 0) this.hud.message('NO CREW', 'There is nobody aboard to send', 1.5);
   }
 
   private begin(): void {
@@ -202,7 +317,7 @@ export class Game {
     this.hud.title.classList.add('hidden');
     this.hud.over.classList.add('hidden');
     this.hud.setVisible(true);
-    this.hud.message('SET SAIL', 'Raiders incoming — sink them before they sink you', 3.5);
+    this.hud.message('SET SAIL', 'Fish, build and patch up. Raiders arrive soon; <kbd>Enter</kbd> to face them now', 5);
   }
 
   private reset(): void {
@@ -213,12 +328,17 @@ export class Game {
     w.harpoons.clear();
     w.debris.clear();
     w.loot.clear();
+    this.repairs.clear();
+    this.fishing.clear();
+    if (this.build.active) this.toggleBuild();
+    this.crew = new Crew(START.crew, START.food);
+    this.rescued = 0;
     this.ais = [];
     this.enemyScore.clear();
     this.enemyLoot.clear();
     this.waves = new WaveManager();
-    this.wood = 10;
-    this.metal = 5;
+    this.res.wood = START.wood;
+    this.res.metal = START.metal;
     this.score = 0;
     this.kills = 0;
     this.spawnPlayer();
@@ -264,36 +384,9 @@ export class Game {
     const s = this.toScreen(_v);
     if (s) this.hud.popup(s.x, s.y - 30, `+${pts * Math.max(1, this.waves.wave)}`, 'score');
     for (const [kind, amount] of this.enemyLoot.get(boat) ?? []) this.world.loot.drop(_v.x, _v.z, kind, amount);
-  }
-
-  // ---------------------------------------------------------------- repair
-
-  /** Between waves the crew patches everything they can afford (hull first). */
-  private repair(): void {
-    const player = this.world.player;
-    if (!player || !player.alive) return;
-    const order = { hull: 0, engine: 1, mount: 2, armor: 3, cabin: 4 } as const;
-    const parts = [...player.parts].sort((a, b) => order[a.def.kind] - order[b.def.kind]);
-    let fixed = 0;
-    for (const p of parts) {
-      const missing = p.alive ? 1 - p.hp / p.def.hp : 1;
-      if (missing <= 0.001) continue;
-      const wood = Math.ceil(p.def.cost.wood * missing);
-      const metal = Math.ceil(p.def.cost.metal * missing);
-      if (wood > this.wood || metal > this.metal) continue;
-      this.wood -= wood;
-      this.metal -= metal;
-      player.restorePart(p);
-      fixed++;
-    }
-    if (fixed) {
-      player.recomputeStats();
-      player.setAllWeapons(WEAPONS[this.weapon]);
-      this.hud.message('PATCHED UP', `${fixed} part${fixed > 1 ? 's' : ''} repaired`, 2);
-      this.world.sound.play('pickup');
-    } else {
-      this.hud.message('NOTHING TO FIX', 'or not enough wood / metal', 2);
-    }
+    // Some of her crew make it into the water.
+    const survivors = Math.max(1, Math.round(boat.turrets.length * 0.6 + Math.random()));
+    for (let i = 0; i < survivors; i++) this.world.loot.survivor(_v.x + (Math.random() - 0.5) * 4, _v.z + (Math.random() - 0.5) * 4);
   }
 
   // ---------------------------------------------------------------- loop
@@ -333,27 +426,27 @@ export class Game {
 
   private handleInput(): void {
     const input = this.input;
-    if (input.wasPressed('Escape')) this.setPaused(this.state === 'playing');
+    if (input.wasPressed('Escape')) {
+      if (this.workshop.isOpen) this.workshop.close();
+      else if (this.build.active) this.toggleBuild();
+      else this.setPaused(this.state === 'playing');
+    }
     if (input.wasPressed('KeyM')) this.world.sound.setMuted(!this.world.sound.muted);
-    if (input.wheel) this.rig.zoom(input.wheel * 0.1);
+    if (input.wheel && !this.build.active) this.rig.zoom(input.wheel * 0.1);
     if (this.state === 'title' && (input.wasPressed('Enter') || input.wasPressed('Space'))) this.begin();
     if (this.state !== 'playing') return;
 
     const player = this.world.player;
     if (!player) return;
-    for (let i = 0; i < PLAYER_WEAPON_ORDER.length; i++) {
-      if (input.wasPressed(`Digit${i + 1}`)) {
-        this.weapon = PLAYER_WEAPON_ORDER[i];
-        this.world.harpoons.release(player);
-        player.setAllWeapons(WEAPONS[this.weapon]);
-      }
-    }
+    if (input.wasPressed('KeyB')) this.toggleBuild();
+    if (this.build.active) return;
     if (input.rightPressed) this.world.harpoons.release(player);
-    if (input.wasPressed('KeyR')) {
-      if (this.waves.phase === 'intermission') this.repair();
-      else this.hud.message('UNDER FIRE', 'Repairs only between waves', 1.5);
+    if (input.wasPressed('KeyR') && player.alive) {
+      const n = this.repairs.queueAll(player);
+      if (n) this.hud.message('ALL HANDS', `${n} repair${n > 1 ? 's' : ''} ordered${player.turrets.length > 1 && this.crew.count <= this.repairs.jobs.length ? ' · gun crews will leave their guns' : ''}`, 1.8);
+      else this.hud.message('SHIPSHAPE', 'Nothing needs fixing', 1.2);
     }
-    if (input.wasPressed('Enter') && this.waves.phase === 'intermission' && this.waves.wave > 0) this.waves.timer = 0;
+    if (input.wasPressed('Enter') && this.waves.phase === 'intermission') this.waves.timer = 0;
   }
 
   private fixedStep(dt: number): void {
@@ -362,7 +455,7 @@ export class Game {
     this.debug.steps++;
     const player = w.player;
 
-    if (player && this.state === 'playing' && player.alive) {
+    if (player && this.state === 'playing' && player.alive && !this.build.active) {
       const i = this.input;
       player.helm.throttle = (i.isDown('KeyW') || i.isDown('ArrowUp') ? 1 : 0) - (i.isDown('KeyS') || i.isDown('ArrowDown') ? 1 : 0);
       player.helm.rudder = (i.isDown('KeyD') || i.isDown('ArrowRight') ? 1 : 0) - (i.isDown('KeyA') || i.isDown('ArrowLeft') ? 1 : 0);
@@ -375,19 +468,30 @@ export class Game {
     }
 
     if (this.state === 'playing') for (const ai of this.ais) ai.update(dt, w);
+
+    // Crew: eat, recruit, then take up stations: repair orders, guns, nets.
+    if (player && this.state === 'playing' && player.alive) {
+      if (!this.build.active) {
+        for (const e of this.crew.update(dt, player.stats.berths)) this.crewEvent(e);
+      }
+      // The captain always works the first gun; crew man the rest.
+      this.assignment = assignCrew(this.crew.count, this.repairs.jobs.length, Math.max(0, player.turrets.length - 1));
+      player.turrets.forEach((t, i) => t.setManned(i === 0 || i <= this.assignment.gunners));
+      this.repairs.update(dt, w, player, this.assignment.repairers, this.crew.efficiency, this.res);
+    }
     for (const b of w.boats) b.step(dt, w);
     this.collisions();
     w.harpoons.step(dt, w);
     w.projectiles.step(dt, w);
 
-    // Waves.
-    if (this.state === 'playing' && player?.alive) {
+    // Waves (the clock stops while you're in the shipyard).
+    if (this.state === 'playing' && player?.alive && !this.build.active) {
       const alive = w.boats.filter((b) => b.team === 'enemy' && b.alive).length;
       const prevPhase = this.waves.phase;
       const spawn = this.waves.update(dt, alive, false);
       if (spawn) this.spawnWave(spawn);
       if (prevPhase === 'combat' && this.waves.phase === 'intermission') {
-        this.hud.message(`WAVE ${this.waves.wave} CLEARED`, 'Collect the salvage · <kbd>R</kbd> patch the boat · <kbd>Enter</kbd> next wave', 6);
+        this.hud.message(`WAVE ${this.waves.wave} CLEARED`, 'Pick up salvage and survivors · <kbd>B</kbd> build · <kbd>Enter</kbd> next wave', 6);
       }
     }
 
@@ -402,6 +506,13 @@ export class Game {
         this.enemyLoot.delete(b);
       }
     }
+  }
+
+  private crewEvent(e: string): void {
+    const c = this.crew;
+    if (e === 'recruited') this.hud.message('NEW HAND', `A drifter signs on for food · ${c.count} crew`, 2.5);
+    else if (e === 'hungry') this.hud.message('OUT OF FOOD', 'Fish on a school (hold <kbd>F</kbd>) or the crew will desert', 4);
+    else if (e === 'deserted') this.hud.message('DESERTER', `A hungry hand jumped ship · ${c.count} crew left`, 3);
   }
 
   /** Boats bump into islands and each other; hard hits damage the parts involved. */
@@ -482,12 +593,22 @@ export class Game {
   private frame(dt: number): void {
     const w = this.world;
     const player = w.player;
-    this.updateAim();
+    const building = this.build.active;
+    if (!building) this.updateAim();
 
     for (const b of w.boats) b.animate(dt, w);
     w.debris.update(dt, w);
     w.loot.update(dt, w);
     w.scenery.update(dt, w.time, w.effects, this.rig.focus.x, this.rig.focus.z);
+
+    // Fishing: hold F while stopped on a school.
+    if (player && this.state === 'playing') {
+      const hauling = !building && player.alive && this.input.isDown('KeyF');
+      const rate = (1 + player.stats.fishing) * (this.assignment.fisher ? 1 : 0.5) * this.crew.efficiency;
+      const haul = this.fishing.update(dt, w, player, hauling, rate);
+      if (haul) this.onHaul(haul);
+    }
+
     w.foam.update(dt);
     this.glow.update(dt, ENV.fogColor, ENV.fogDensity);
     this.smoke.update(dt, ENV.fogColor, ENV.fogDensity);
@@ -495,39 +616,90 @@ export class Game {
 
     if (player) {
       player.centerWorld(_v);
-      this.rig.update(dt, _v, player.body.vel, this.state === 'playing' ? this.aim : null);
-      w.sound.setListener(this.rig.focus.x, this.rig.focus.z);
+      if (building) {
+        this.build.update(dt);
+        this.rig.snap(_v);
+        this.buildHud.updateTip(this.input.mouseX, this.input.mouseY);
+      } else {
+        this.rig.update(dt, _v, player.body.vel, this.state === 'playing' ? this.aim : null);
+      }
+      w.sound.setListener(_v.x, _v.z);
       w.sound.setEngine(Math.abs(player.helm.throttle), player.alive && player.stats.thrust > 0);
       if (!player.alive && this.state === 'playing') {
         this.overTimer -= dt;
         if (this.overTimer <= 0) {
           this.state = 'over';
           this.hud.setVisible(false);
-          this.hud.showGameOver(this.waves.wave, this.score, this.kills);
+          this.hud.showGameOver(this.waves.wave, this.score, this.kills, this.rescued);
         }
       }
     }
 
-    const intermission = this.waves.phase === 'intermission' && this.waves.wave > 0;
+    const intermission = this.waves.phase === 'intermission';
     const enemies = w.boats.filter((b) => b.team === 'enemy');
     const turret = player?.turrets[0];
+    const berths = player?.stats.berths ?? 2;
     this.hud.update(dt, {
       player,
-      weapon: this.weapon,
-      wood: this.wood,
-      metal: this.metal,
+      crew: {
+        count: this.crew.count,
+        berths,
+        food: this.crew.food,
+        starving: this.crew.starving,
+        recruitEta: this.crew.recruitEta(berths),
+        gunners: this.assignment.gunners,
+        repairers: this.assignment.repairers,
+      },
+      jobStatus: (p) => this.repairs.status(p),
+      wood: this.res.wood,
+      metal: this.res.metal,
       wave: this.waves.wave,
-      waveSub: intermission ? `next wave in ${Math.ceil(this.waves.timer)}s` : `${enemies.filter((e) => e.alive).length} hostiles`,
+      waveSub: intermission ? `${this.waves.wave ? 'next' : 'first'} wave in ${Math.ceil(this.waves.timer)}s` : `${enemies.filter((e) => e.alive).length} hostiles`,
       score: this.score,
       mouseX: this.input.mouseX,
       mouseY: this.input.mouseY,
       canBear: !turret || turret.canBear,
-      lead: this.leadMarker(),
+      lead: building ? null : this.leadMarker(),
       enemies,
       camera: this.rig.camera,
       width: window.innerWidth,
       height: window.innerHeight,
+      prompt: this.prompt(),
+      building,
     });
+  }
+
+  private onHaul(h: { food: number; wood: number; metal: number }): void {
+    this.crew.food += h.food;
+    this.res.wood += h.wood;
+    this.res.metal += h.metal;
+    const player = this.world.player!;
+    player.centerWorld(_v);
+    _v.y += 1.5;
+    const s = this.toScreen(_v);
+    if (!s) return;
+    this.hud.popup(s.x, s.y, `+${h.food} FOOD`, 'food');
+    if (h.wood) this.hud.popup(s.x + 40, s.y + 18, `+${h.wood} WOOD`, 'wood');
+    if (h.metal) this.hud.popup(s.x + 40, s.y + 18, `+${h.metal} METAL`, 'metal');
+    this.world.sound.play('pickup');
+  }
+
+  /** Contextual hint above the gun bar. */
+  private prompt(): Prompt | null {
+    const player = this.world.player;
+    if (!player?.alive || this.state !== 'playing' || this.build.active) return null;
+    if (this.fishing.active) return { text: 'Hauling in the net…', progress: this.fishing.progress };
+    if (this.fishing.schoolAt(player)) {
+      return Math.abs(player.forwardSpeed()) < MAX_FISHING_SPEED
+        ? { text: 'Fish below · hold <kbd>F</kbd> to fish', progress: this.fishing.progress }
+        : { text: 'Fish below · stop the boat to fish' };
+    }
+    const damaged = player.parts.some((p) => !p.alive || p.hp < p.def.hp * 0.7);
+    if (this.waves.phase === 'intermission') {
+      return { text: `<kbd>B</kbd> build · ${damaged ? '<kbd>R</kbd> repair · ' : ''}<kbd>Enter</kbd> next wave · gulls mark fish` };
+    }
+    if (damaged && !this.repairs.jobs.length) return { text: 'Damaged · <kbd>R</kbd> or click the diagram to send crew' };
+    return null;
   }
 
   /** Mouse ray against the actual wave surface. */

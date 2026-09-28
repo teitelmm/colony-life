@@ -13,7 +13,7 @@ import {
   TorusGeometry,
   type Material,
 } from 'three';
-import type { WeaponId } from './weaponDefs';
+import type { WeaponDef } from './weaponDefs';
 import { rustyMetalTexture } from '../render/textures';
 
 export interface WeaponRig {
@@ -70,8 +70,9 @@ export function crewFigure(shirt: number): Group {
   return g;
 }
 
-export function buildWeaponRig(id: WeaponId, crewShirt?: number): WeaponRig {
+export function buildWeaponRig(def: WeaponDef, crewShirt?: number): WeaponRig {
   const m = M();
+  const id = def.rig;
   const yaw = new Group();
   const pitch = new Group();
   const muzzle = new Object3D();
@@ -142,6 +143,13 @@ export function buildWeaponRig(id: WeaponId, crewShirt?: number): WeaponRig {
       muzzle.position.set(0, 0, 0.85);
       break;
     }
+  }
+
+  // Workshop barrels: stretch the gun along its bore; mark special ammo with a coloured band.
+  if (def.barrelScale !== 1) pitch.scale.z = def.barrelScale;
+  if (def.incendiary > 0 || (def.splashDamage > 0 && def.kind === 'bullet')) {
+    const tint = def.incendiary > 0 ? 0xd9482b : 0xe0b43a;
+    pitch.add(mesh(new BoxGeometry(0.22, 0.06, 0.08), new MeshStandardMaterial({ color: tint, roughness: 0.5 }), 0, 0.13, 0));
   }
 
   let crew: Group | undefined;

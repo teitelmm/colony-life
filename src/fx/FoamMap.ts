@@ -25,7 +25,7 @@ import {
   type WebGLRenderer,
 } from 'three';
 
-export const DecalType = { Ring: 0, Foam: 1, Oil: 2, Hull: 3 } as const;
+export const DecalType = { Ring: 0, Foam: 1, Oil: 2, Hull: 3, School: 4 } as const;
 export type DecalType = (typeof DecalType)[keyof typeof DecalType];
 
 interface Decal {
@@ -73,6 +73,7 @@ void main() {
 `;
 
 const decalFrag = /* glsl */ `
+uniform float uTime;
 varying vec2 vLocal;
 varying vec4 vParams;
 varying vec2 vWorld;
@@ -97,6 +98,12 @@ void main() {
   } else if (type == 2) {
     float blob = smoothstep(1.0, 0.35, r + (n - 0.5) * 0.9);
     o.g = blob * I * (1.0 - smoothstep(0.65, 1.0, t)) * smoothstep(0.0, 0.05, t);
+  } else if (type == 4) {
+    // fish school: a dark, restless shoal with nervous ripples on top
+    float shoal = smoothstep(1.0, 0.2, r + (fnoise(vWorld * 0.9 + uTime * 0.6) - 0.5) * 0.9);
+    float flicker = fnoise(vWorld * 4.0 + vec2(uTime * 1.3, -uTime));
+    o.b = shoal * 0.55 * I;
+    o.r = shoal * smoothstep(0.72, 0.95, flicker) * 0.6 * I;
   } else {
     // hull contact: foam at the waterline edge, shadow underneath
     float edge = smoothstep(0.22, 0.0, abs(r - 0.92));
@@ -142,6 +149,7 @@ export class FoamMap {
   readonly size: number;
   readonly wakeMaterial: ShaderMaterial;
   private readonly prevClear = new Color();
+  private readonly time = { value: 0 };
 
   private readonly decals: Decal[] = [];
   private readonly cap = 1024;
@@ -180,6 +188,7 @@ export class FoamMap {
     this.geo = geo;
 
     const decalMat = new ShaderMaterial({
+      uniforms: { uTime: this.time },
       vertexShader: decalVert,
       fragmentShader: decalFrag,
       side: DoubleSide,
@@ -225,7 +234,13 @@ export class FoamMap {
     this.add(DecalType.Hull, x, z, halfLength + 0.25, halfLength + 0.25, 0, intensity, heading, (halfWidth + 0.25) / (halfLength + 0.25));
   }
 
+  /** Per-frame fish-school patch. */
+  school(x: number, z: number, radius: number, intensity: number): void {
+    this.add(DecalType.School, x, z, radius, radius, 0, intensity, 0);
+  }
+
   update(dt: number): void {
+    this.time.value += dt;
     const X = this.aXform.array as Float32Array;
     const P = this.aParams.array as Float32Array;
     const S = this.aSeed.array as Float32Array;

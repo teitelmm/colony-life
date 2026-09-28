@@ -40,6 +40,8 @@ export class Boat {
   /** part index → fire intensity 0..1 */
   readonly fires = new Map<number, number>();
   lastAttacker: Boat | null = null;
+  /** called for every part that is destroyed or knocked off */
+  onPartDestroyed: ((part: PartInstance) => void) | null = null;
   wake: Wake | null = null;
   private readonly ctx: ReturnType<typeof buildPartContext>;
 
@@ -54,14 +56,19 @@ export class Boat {
       x: p.x,
       y: p.y,
       z: p.z,
-      hp: PARTS[p.part].hp,
+      hp: Math.min(PARTS[p.part].hp, p.hp ?? PARTS[p.part].hp),
       alive: true,
       weapon: p.weapon,
+      facing: p.facing,
     }));
     this.stats = computeStats(this.parts);
     this.body.setMassProperties(this.stats);
     this.ctx = buildPartContext(design, this.parts);
-    for (const part of this.parts) this.visuals.push(this.buildPart(part));
+    for (const part of this.parts) {
+      const v = this.buildPart(part);
+      if (part.hp < part.def.hp) applyDamageTint(v, part.hp / part.def.hp);
+      this.visuals.push(v);
+    }
     this.wake = new Wake(world.foam);
   }
 
@@ -165,6 +172,11 @@ export class Boat {
         v.exhaust.getWorldPosition(_p);
         fx.exhaust(_p, Math.abs(this.helm.throttle), dt, part.def.id === 'engine_diesel');
       }
+      if (v.chimney && afloat && Math.random() < dt * 1.5) {
+        v.chimney.getWorldPosition(_p);
+        fx.exhaust(_p, 0, 1, false);
+      }
+      if (v.net) v.net.rotation.y = Math.sin(world.time * 0.6 + this.id) * 0.5;
       if (v.flag) {
         const t = world.time * 6 + this.id;
         v.flag.rotation.y = Math.PI / 2 + Math.sin(t) * 0.25 + 0.4;
@@ -248,6 +260,7 @@ export class Boat {
       else world.effects.hit(_p, part.def.material, 2.5);
       world.sound.play('break', _p.x, _p.z);
     }
+    this.onPartDestroyed?.(part);
     const turretIdx = this.turrets.findIndex((t) => t.part === part);
     if (turretIdx >= 0) this.turrets.splice(turretIdx, 1);
 
@@ -261,6 +274,7 @@ export class Boat {
         world.debris.spawnFromPart(dv.group, p, this, _q.set(0, 1, 0));
         this.visuals[idx] = null;
       }
+      this.onPartDestroyed?.(p);
       const ti = this.turrets.findIndex((t) => t.part === p);
       if (ti >= 0) this.turrets.splice(ti, 1);
     }
@@ -295,6 +309,27 @@ export class Boat {
     part.hp = part.def.hp;
     this.visuals[part.index] = this.buildPart(part);
     this.syncGroup();
+  }
+
+  /** Re-tint a part after its hp changed outside of combat (repairs). */
+  refreshDamage(part: PartInstance): void {
+    const v = this.visuals[part.index];
+    if (v) applyDamageTint(v, part.hp / part.def.hp);
+  }
+
+  /** Set a part burning (incendiary hits). */
+  ignite(part: PartInstance, intensity = 0.7): void {
+    if (part.alive && !this.fires.has(part.index)) this.fires.set(part.index, intensity);
+  }
+
+  /** The boat as it stands now: surviving parts with their current damage. */
+  toDesign(): BoatDesign {
+    return {
+      ...this.design,
+      parts: this.parts
+        .filter((p) => p.alive)
+        .map((p) => ({ part: p.def.id, x: p.x, y: p.y, z: p.z, weapon: p.weapon, facing: p.facing, hp: p.hp })),
+    };
   }
 
   setAllWeapons(def: WeaponDef): void {
