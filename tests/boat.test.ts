@@ -119,15 +119,16 @@ describe('boat physics', () => {
 
 describe('riding the swell', () => {
   it.each(['dinghy', 'raider', 'harpooner', 'gunboat', 'barge'] as const)('keeps the %s deck above water in the default sea', async (name) => {
-    const { sampleHeight } = await import('../src/world/waves');
+    const { sampleHeight, sampleSurface } = await import('../src/world/waves');
     const parts = instantiate(DESIGNS[name]());
     const body = new BoatBody();
     const stats = computeStats(parts);
     body.setMassProperties(stats);
     let t = 0;
+    // Same sampler the game uses.
     const water: WaterSampler = {
       height: (x, z) => sampleHeight(x, z, t),
-      verticalVelocity: (x, z) => (sampleHeight(x, z, t + 0.05) - sampleHeight(x, z, t - 0.05)) / 0.1,
+      surface: (x, z, out) => sampleSurface(x, z, t, out),
     };
     let awash = 0;
     let samples = 0;

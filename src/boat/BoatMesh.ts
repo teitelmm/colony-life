@@ -16,6 +16,7 @@ import {
   SphereGeometry,
   type BufferGeometry,
 } from 'three';
+import { mergeChildren } from '../render/merge';
 import { DECK_TOP, type BoatDesign } from './parts';
 import type { PartInstance } from './BoatStats';
 import { deckTexture, hullSideTexture, rustyMetalTexture, tarpTexture } from '../render/textures';
@@ -243,6 +244,8 @@ export function buildPartVisual(part: PartInstance, ctx: Ctx): PartVisual {
     }
   }
 
+  // Batch this block's static pieces (the flag waves, so it stays separate).
+  mergeChildren(group, visual.flag ? [visual.flag] : []);
   visual.baseColors = materials.map((m) => m.color.clone());
   return visual;
 }

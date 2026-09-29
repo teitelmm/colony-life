@@ -212,6 +212,11 @@ export class FoamMap {
     });
   }
 
+  /** Render-target resolution (quality tiers). */
+  setResolution(n: number): void {
+    if (this.target.width !== n) this.target.setSize(n, n);
+  }
+
   add(type: DecalType, x: number, z: number, r0: number, r1: number, life: number, intensity: number, rot = Math.random() * 6.28, aspect = 1): void {
     if (this.decals.length >= this.cap) this.decals.shift();
     this.decals.push({ x, z, r0, r1, aspect, rot, life, age: 0, type, intensity, seed: Math.random() * 100 });

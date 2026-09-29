@@ -4,17 +4,8 @@
  * scrap that came up in the net.
  */
 
-import {
-  BoxGeometry,
-  CatmullRomCurve3,
-  Group,
-  Mesh,
-  MeshStandardMaterial,
-  SphereGeometry,
-  TubeGeometry,
-  Vector3,
-  type Scene,
-} from 'three';
+import { BoxGeometry, Group, Mesh, MeshStandardMaterial, SphereGeometry, Vector3, type Scene } from 'three';
+import { Rope } from '../fx/Rope';
 import type { Boat } from '../boat/Boat';
 import type { World } from './World';
 import { PType } from '../fx/Particles';
@@ -40,31 +31,22 @@ export const HAUL_RATE = 0.22;
 export const MAX_FISHING_SPEED = 1.6;
 
 const gullMat = new MeshStandardMaterial({ color: 0xe9e6de, roughness: 0.8 });
-const gullTip = new MeshStandardMaterial({ color: 0x2c2c2c, roughness: 0.8 });
 const lineMat = new MeshStandardMaterial({ color: 0xd8cfae, roughness: 1 });
 const floatMat = new MeshStandardMaterial({ color: 0xe84a2a, roughness: 0.5 });
 const _a = new Vector3();
 const _b = new Vector3();
 
 function makeGull(): Group {
+  // Three meshes, no shadows: gulls fly high and are tiny from the camera.
   const g = new Group();
   const body = new Mesh(new BoxGeometry(0.12, 0.1, 0.4), gullMat);
-  const lw = new Group();
-  const rw = new Group();
-  const wingL = new Mesh(new BoxGeometry(0.55, 0.02, 0.16), gullMat);
-  wingL.position.x = -0.28;
-  const tipL = new Mesh(new BoxGeometry(0.14, 0.021, 0.12), gullTip);
-  tipL.position.x = -0.5;
-  lw.add(wingL, tipL);
-  const wingR = wingL.clone();
-  wingR.position.x = 0.28;
-  const tipR = tipL.clone();
-  tipR.position.x = 0.5;
-  rw.add(wingR, tipR);
+  const lw = new Mesh(new BoxGeometry(0.68, 0.02, 0.16), gullMat);
+  lw.geometry.translate(-0.34, 0, 0);
+  const rw = new Mesh(new BoxGeometry(0.68, 0.02, 0.16), gullMat);
+  rw.geometry.translate(0.34, 0, 0);
   lw.name = 'l';
   rw.name = 'r';
   g.add(body, lw, rw);
-  g.traverse((o) => (o.castShadow = true));
   return g;
 }
 
@@ -73,11 +55,11 @@ export class Fishing {
   /** 0..1 progress to the next haul */
   progress = 0;
   active = false;
-  private line: Mesh;
+  private line: Rope;
   private float: Mesh;
 
   constructor(private readonly scene: Scene) {
-    this.line = new Mesh(undefined, lineMat);
+    this.line = new Rope(lineMat, 9, 0.015, 3);
     this.line.visible = false;
     this.float = new Mesh(new SphereGeometry(0.12, 8, 6), floatMat);
     this.float.visible = false;
@@ -175,10 +157,12 @@ export class Fishing {
     boat.body.localToWorld(_b.set(boat.stats.centerX + boat.stats.halfWidth + 3, 0, boat.stats.centerZ + 1), _b);
     _b.y = world.water.height(_b.x, _b.z);
     this.float.position.copy(_b).setY(_b.y + Math.sin(world.time * 5) * 0.05);
-    const mid = _a.clone().lerp(_b, 0.5);
-    mid.y -= 0.4;
-    this.line.geometry.dispose();
-    this.line.geometry = new TubeGeometry(new CatmullRomCurve3([_a.clone(), mid, _b.clone()]), 10, 0.015, 3, false);
+    const pts = this.line.points;
+    for (let i = 0; i < pts.length; i++) {
+      const t = i / (pts.length - 1);
+      pts[i].lerpVectors(_a, _b, t).y -= Math.sin(t * Math.PI) * 0.4;
+    }
+    this.line.refresh();
     if (Math.random() < dt * 1.5) world.foam.ring(_b.x, _b.z, 0.7, 0.8, 0.4);
 
     this.progress += dt * HAUL_RATE * rate;

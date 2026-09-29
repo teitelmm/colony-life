@@ -18,7 +18,8 @@ import {
   type BufferGeometry,
   type Scene,
 } from 'three';
-import { sampleHeight, sampleNormal } from './waves';
+import { sampleHeight, sampleTilt } from './waves';
+import { mergeByMaterial } from '../render/merge';
 import type { Effects } from '../fx/effects';
 import { hullSideTexture, rustyMetalTexture } from '../render/textures';
 
@@ -92,6 +93,7 @@ export class Scenery {
   private readonly _n = { x: 0, y: 0, z: 0 };
   private readonly _q = new Quaternion();
   private readonly _up = new Vector3(0, 1, 0);
+  private tick = 0;
 
   constructor(scene: Scene, seed = 7) {
     const r = rng(seed);
@@ -114,13 +116,17 @@ export class Scenery {
     }
     for (const [x, z, radius] of spots) {
       const height = 2 + r() * radius * 0.5;
+      // Each island and its ruins become a handful of batched meshes (one per material).
+      const cluster = new Group();
       const mesh = new Mesh(islandGeometry(radius, height, r), landMat);
       mesh.position.set(x, 0, z);
       mesh.rotation.y = r() * 6.28;
-      mesh.castShadow = mesh.receiveShadow = true;
-      this.group.add(mesh);
+      cluster.add(mesh);
       this.islands.push({ x, z, radius: radius * 0.95, height });
-      this.decorate(x, z, radius, height, r);
+      this.decorate(cluster, x, z, radius, height, r);
+      this.group.add(cluster);
+      // The terrain itself doesn't need to cast (it's thousands of triangles for a barely visible shadow).
+      mergeByMaterial(cluster, { castShadow: (m) => m !== landMat });
     }
 
     // Burning, half-sunk wrecks.
@@ -158,7 +164,7 @@ export class Scenery {
     scene.add(this.group);
   }
 
-  private decorate(x: number, z: number, radius: number, height: number, r: () => number): void {
+  private decorate(into: Group, x: number, z: number, radius: number, height: number, r: () => number): void {
     const trunkMat = new MeshStandardMaterial({ color: 0x2a211b, roughness: 1 });
     // Dead, burnt trees.
     const trees = 2 + ((r() * radius) / 3) | 0;
@@ -169,8 +175,7 @@ export class Scenery {
       const t = new Mesh(new CylinderGeometry(0.06, 0.16, h, 5), trunkMat);
       t.position.set(x + Math.cos(a) * d, height * 0.5 + h / 2 - 0.5, z + Math.sin(a) * d);
       t.rotation.set((r() - 0.5) * 0.5, 0, (r() - 0.5) * 0.5);
-      t.castShadow = true;
-      this.group.add(t);
+      into.add(t);
       for (let b = 0; b < 2; b++) {
         const br = new Mesh(new CylinderGeometry(0.03, 0.06, h * 0.4, 4), trunkMat);
         br.position.set(0, h * (0.1 + r() * 0.3), 0);
@@ -194,7 +199,7 @@ export class Scenery {
       lh.add(cap);
       lh.position.set(x, height * 0.55 - 0.5, z);
       lh.rotation.z = 0.12; // shell-shocked lean
-      this.group.add(lh);
+      into.add(lh);
       this.emitters.push({ pos: new Vector3(x, height * 0.55 + 8, z), kind: 'fire', intensity: 0.5 });
     } else if (r() < 0.6) {
       const concrete = new MeshStandardMaterial({ color: 0x8b8781, roughness: 1, flatShading: true });
@@ -202,8 +207,7 @@ export class Scenery {
         const b = new Mesh(new BoxGeometry(1.5 + r() * 2, 1 + r() * 1.2, 1.5 + r() * 2), concrete);
         b.position.set(x + (r() - 0.5) * radius * 0.6, height * 0.5, z + (r() - 0.5) * radius * 0.6);
         b.rotation.set((r() - 0.5) * 0.3, r() * 3, (r() - 0.5) * 0.3);
-        b.castShadow = b.receiveShadow = true;
-        this.group.add(b);
+        into.add(b);
       }
     }
   }
@@ -226,15 +230,21 @@ export class Scenery {
     g.position.set(x, -0.9, z);
     g.rotation.set(0.25 + r() * 0.2, r() * 6.28, (r() - 0.5) * 0.5);
     this.group.add(g);
+    mergeByMaterial(g);
     this.islands.push({ x, z, radius: len * 0.35, height: 2 });
     this.emitters.push({ pos: new Vector3(x, 1.5, z), kind: 'fire', intensity: 0.7 + r() * 0.3 });
   }
 
   update(dt: number, time: number, fx: Effects, focusX: number, focusZ: number): void {
-    for (const f of this.floaters) {
-      if (Math.abs(f.x - focusX) > 110 || Math.abs(f.z - focusZ) > 110) continue;
+    this.tick++;
+    for (let i = 0; i < this.floaters.length; i++) {
+      const f = this.floaters[i];
+      const far = Math.max(Math.abs(f.x - focusX), Math.abs(f.z - focusZ));
+      if (far > 110) continue;
+      // Props at the edge of view bob at a quarter rate; nobody can tell.
+      if (far > 55 && (this.tick + i) % 4 !== 0) continue;
       const y = sampleHeight(f.x, f.z, time);
-      sampleNormal(f.x, f.z, time, this._n);
+      sampleTilt(f.x, f.z, time, y, this._n);
       f.obj.position.set(f.x, y - f.depth, f.z);
       this._q.setFromUnitVectors(this._up, this._n as Vector3);
       f.obj.quaternion.copy(this._q);

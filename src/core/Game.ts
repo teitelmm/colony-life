@@ -39,7 +39,7 @@ import { ENV } from '../world/environment';
 import { Ocean } from '../world/Ocean';
 import { Scenery } from '../world/Scenery';
 import { createSky } from '../world/Sky';
-import { GRAVITY, sampleHeight } from '../world/waves';
+import { GRAVITY, sampleHeight, sampleSurface, type SurfaceSample } from '../world/waves';
 import { Input } from './Input';
 import type { BoatDesign } from '../boat/parts';
 import type { PartInstance } from '../boat/BoatStats';
@@ -50,6 +50,26 @@ import { Crew, assignCrew, type Assignment } from '../game/Crew';
 import { Repairs } from '../game/Repairs';
 import { Fishing, MAX_FISHING_SPEED } from '../game/Fishing';
 import type { Prompt } from '../ui/Hud';
+import { QualityGovernor, TIERS, type QualityChange, type QualityMode, type Tier } from '../render/Quality';
+import { PerfOverlay } from '../ui/PerfOverlay';
+
+const QUALITY_KEY = 'salt-scrap-quality';
+function readQualityMode(): QualityMode {
+  try {
+    const v = localStorage.getItem(QUALITY_KEY);
+    if (v === 'auto' || v === 'low' || v === 'medium' || v === 'high') return v;
+  } catch {
+    /* storage blocked */
+  }
+  return 'auto';
+}
+function writeQualityMode(mode: QualityMode): void {
+  try {
+    localStorage.setItem(QUALITY_KEY, mode);
+  } catch {
+    /* storage blocked: the choice lasts this session */
+  }
+}
 
 const START = { wood: 24, metal: 14, food: 12, crew: 2 };
 
@@ -95,11 +115,14 @@ export class Game {
   private readonly enemyScore = new Map<Boat, number>();
   private readonly enemyLoot = new Map<Boat, (typeof ENEMY_TYPES)[keyof typeof ENEMY_TYPES]['loot']>();
   /** exposed for automated smoke tests */
-  debug = { steps: 0, frames: 0 };
+  debug = { steps: 0, frames: 0, simMs: 0, frameMs: 0 };
+  readonly quality = new QualityGovernor(readQualityMode());
+  private readonly perf = new PerfOverlay(document.body);
+  private appliedTier: Tier | null = null;
 
   constructor(container: HTMLElement) {
     const renderer = new WebGLRenderer({ antialias: false, powerPreference: 'high-performance' });
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1));
     renderer.setSize(window.innerWidth, window.innerHeight);
     renderer.outputColorSpace = SRGBColorSpace;
     renderer.toneMapping = ACESFilmicToneMapping;
@@ -118,10 +141,11 @@ export class Game {
     this.sun.castShadow = true;
     this.sun.shadow.mapSize.set(2048, 2048);
     const sc = this.sun.shadow.camera;
-    sc.left = sc.bottom = -38;
-    sc.right = sc.top = 38;
-    sc.near = 1;
-    sc.far = 200;
+    // Tight shadow frustum around the view: fewer casters, sharper shadows.
+    sc.left = sc.bottom = -30;
+    sc.right = sc.top = 30;
+    sc.near = 20;
+    sc.far = 140;
     this.sun.shadow.bias = -0.0004;
     this.sun.shadow.normalBias = 0.03;
     scene.add(this.sun, this.sun.target);
@@ -146,7 +170,7 @@ export class Game {
     const sound = new Sound();
     const water = {
       height: (x: number, z: number) => sampleHeight(x, z, this.world.time),
-      verticalVelocity: (x: number, z: number) => (sampleHeight(x, z, this.world.time + 0.05) - sampleHeight(x, z, this.world.time - 0.05)) / 0.1,
+      surface: (x: number, z: number, out: SurfaceSample) => sampleSurface(x, z, this.world.time, out),
     };
     const effects = new Effects(this.glow, this.smoke, foam, this.flash, sound, this.rig, water.height);
     const projectiles = new ProjectileSystem(scene);
@@ -195,12 +219,14 @@ export class Game {
       return true;
     };
     this.hud.onSchematicClick = (part) => this.orderRepair(part);
+    this.hud.onQualityMode = (mode) => this.setQualityMode(mode);
+    this.hud.setQualityMode(this.quality.mode);
 
     this.fishing = new Fishing(scene);
     loadSavedGuns();
 
     this.post = new PostFX(renderer, scene, this.rig.camera);
-    this.post.setSize(window.innerWidth, window.innerHeight, renderer.getPixelRatio());
+    this.applyQuality({ tier: this.quality.tier, scale: this.quality.scale });
     this.input = new Input(renderer.domElement);
 
     this.build = new BuildMode({
@@ -404,10 +430,13 @@ export class Game {
 
   private loop(now: number): void {
     requestAnimationFrame((t) => this.loop(t));
-    const dt = Math.min(0.1, (now - this.last) / 1000);
+    const realDt = Math.max(0, (now - this.last) / 1000);
+    const dt = Math.min(0.1, realDt);
     this.last = now;
     this.handleInput();
 
+    if (this.input.wasPressed('Backquote')) this.perf.toggle();
+    const t0 = performance.now();
     if (this.state !== 'paused') {
       this.accumulator += dt;
       let steps = 0;
@@ -417,11 +446,61 @@ export class Game {
         steps++;
       }
       if (steps === 5) this.accumulator = 0;
+      const t1 = performance.now();
       this.frame(dt);
+      this.debug.simMs += (t1 - t0 - this.debug.simMs) * 0.1;
+      this.debug.frameMs += (performance.now() - t1 - this.debug.frameMs) * 0.1;
     }
     this.render(dt);
     this.input.endFrame();
     this.debug.frames++;
+
+    // Trade resolution and effects for frame rate while the tab is visible.
+    if (!document.hidden) {
+      const change = this.quality.sample(Math.min(1, realDt));
+      if (change) this.applyQuality(change);
+    }
+    this.perf.update(this.quality, this.debug, this.renderer);
+  }
+
+  /** Switch between Auto and a fixed graphics tier (pause menu). */
+  setQualityMode(mode: QualityMode): void {
+    writeQualityMode(mode);
+    this.applyQuality(this.quality.setMode(mode));
+    this.hud.setQualityMode(mode);
+  }
+
+  private applyQuality(c: QualityChange): void {
+    const s = TIERS[c.tier];
+    const r = this.renderer;
+    const pr = Math.min(window.devicePixelRatio, s.maxPixelRatio);
+    if (this.appliedTier !== c.tier) {
+      this.appliedTier = c.tier;
+      const shadows = s.shadowMap > 0;
+      if (r.shadowMap.enabled !== shadows) {
+        r.shadowMap.enabled = shadows;
+        // Materials bake shadow support into their shaders.
+        this.scene.traverse((o) => {
+          const m = (o as { material?: { needsUpdate: boolean } | { needsUpdate: boolean }[] }).material;
+          if (Array.isArray(m)) m.forEach((x) => (x.needsUpdate = true));
+          else if (m) m.needsUpdate = true;
+        });
+      }
+      this.sun.castShadow = shadows;
+      if (shadows && this.sun.shadow.mapSize.x !== s.shadowMap) {
+        this.sun.shadow.mapSize.set(s.shadowMap, s.shadowMap);
+        this.sun.shadow.map?.dispose();
+        this.sun.shadow.map = null;
+      }
+      this.world.foam.setResolution(s.foamResolution);
+      this.ocean.setDetail(s.oceanDetail);
+      this.ocean.setSegments(c.tier === 'high' ? 320 : c.tier === 'medium' ? 240 : 180);
+      this.glow.density = this.smoke.density = s.particles;
+      this.post.setQuality(s.msaa, s.bloom, s.bloomScale);
+    }
+    r.setPixelRatio(pr);
+    r.setSize(window.innerWidth, window.innerHeight);
+    this.post.setSize(window.innerWidth, window.innerHeight, pr * c.scale);
   }
 
   private handleInput(): void {
@@ -767,12 +846,9 @@ export class Game {
   }
 
   private resize(): void {
-    const w = window.innerWidth;
-    const h = window.innerHeight;
-    this.renderer.setSize(w, h);
-    this.rig.camera.aspect = w / h;
+    this.rig.camera.aspect = window.innerWidth / window.innerHeight;
     this.rig.camera.updateProjectionMatrix();
-    this.post.setSize(w, h, this.renderer.getPixelRatio());
+    this.applyQuality({ tier: this.quality.tier, scale: this.quality.scale });
   }
 }
 

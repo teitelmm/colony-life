@@ -13,7 +13,11 @@ export interface WaterSampler {
   height(x: number, z: number): number;
   /** vertical velocity of the surface (m/s); defaults to 0 */
   verticalVelocity?(x: number, z: number): number;
+  /** height and vertical velocity in one call (preferred when available) */
+  surface?(x: number, z: number, out: { height: number; vy: number }): { height: number; vy: number };
 }
+
+const _surf = { height: 0, vy: 0 };
 
 export interface HelmControls {
   /** -1 (reverse) .. 1 (full ahead) */
@@ -24,6 +28,9 @@ export interface HelmControls {
 
 const _v = new Vector3();
 const _v2 = new Vector3();
+const _comW = new Vector3();
+const _alpha = new Vector3();
+const _angL = new Vector3();
 const _q = new Quaternion();
 
 export class BoatBody {
@@ -119,10 +126,10 @@ export class BoatBody {
   }
 
   integrate(dt: number): void {
-    const comW = this.comWorld(new Vector3());
+    const comW = this.comWorld(_comW);
     this.vel.addScaledVector(this.force, dt / this.mass);
     this.vel.y -= GRAVITY * dt;
-    const alpha = this.applyInvInertia(this.torque.clone());
+    const alpha = this.applyInvInertia(_alpha.copy(this.torque));
     this.angVel.addScaledVector(alpha, dt);
 
     comW.addScaledVector(this.vel, dt);
@@ -162,10 +169,19 @@ export function applyWaterForces(
     cells++;
     _p.set(part.x, part.y, part.z);
     body.localToWorld(_p, _p);
-    const waterY = water.height(_p.x, _p.z);
+    let waterY: number;
+    let surfaceVy = 0;
+    if (water.surface) {
+      water.surface(_p.x, _p.z, _surf);
+      waterY = _surf.height;
+      surfaceVy = _surf.vy;
+    } else {
+      waterY = water.height(_p.x, _p.z);
+    }
     const frac = Math.min(1, Math.max(0, waterY - (_p.y - 0.5)));
     submergedSum += frac;
     if (frac <= 0) continue;
+    if (!water.surface && water.verticalVelocity) surfaceVy = water.verticalVelocity(_p.x, _p.z);
 
     // Buoyancy acts at the centre of the submerged slice of the cell.
     _p.set(part.x, part.y - 0.5 + frac * 0.5, part.z);
@@ -176,7 +192,6 @@ export function applyWaterForces(
     // Heave/roll/pitch damping: water resists motion *relative to the moving surface*,
     // so hulls ride up the face of a swell instead of lagging under it.
     body.pointVelocity(_p, _pv);
-    const surfaceVy = water.verticalVelocity?.(_p.x, _p.z) ?? 0;
     _f.set(0, -3200 * frac * (_pv.y - surfaceVy), 0);
     body.addForceAtPoint(_f, _p);
   }
@@ -224,7 +239,7 @@ export function applyWaterForces(
     body.addTorque(_p);
   }
 
-  const localAngVel = body.angVel.clone().applyQuaternion(_invQ);
+  const localAngVel = _angL.copy(body.angVel).applyQuaternion(_invQ);
   const damp = Math.max(0.35, grip);
   _f.set(
     -body.inertia.x * 1.4 * localAngVel.x * damp,

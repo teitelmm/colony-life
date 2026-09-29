@@ -3,17 +3,8 @@
  * spring tether that drags the struck boat in (and the shooter toward it).
  */
 
-import {
-  CatmullRomCurve3,
-  ConeGeometry,
-  CylinderGeometry,
-  Group,
-  Mesh,
-  MeshStandardMaterial,
-  TubeGeometry,
-  Vector3,
-  type Scene,
-} from 'three';
+import { ConeGeometry, CylinderGeometry, Group, Mesh, MeshStandardMaterial, Vector3, type Scene } from 'three';
+import { Rope } from '../fx/Rope';
 import type { Projectile } from './Projectiles';
 import type { Boat } from '../boat/Boat';
 import type { Turret } from './Turret';
@@ -31,7 +22,7 @@ interface Link {
   end: Vector3;
   length: number;
   age: number;
-  rope: Mesh;
+  rope: Rope;
   spear: Group;
 }
 
@@ -62,9 +53,8 @@ export class HarpoonSystem {
 
   spawn(p: Projectile): void {
     if (!p.turret) return;
-    const rope = new Mesh(undefined, ropeMat);
+    const rope = new Rope(ropeMat, 15, 0.03, 4);
     rope.castShadow = true;
-    rope.frustumCulled = false;
     const spear = makeSpear();
     this.scene.add(rope, spear);
     this.links.push({
@@ -179,18 +169,16 @@ export class HarpoonSystem {
       _b.copy(l.end);
       const dist = _a.distanceTo(_b);
       const slack = l.state === 'attached' ? Math.max(0, l.length - dist) : dist * 0.08;
-      const pts: Vector3[] = [];
-      const N = 14;
+      const pts = l.rope.points;
+      const N = pts.length - 1;
       for (let i = 0; i <= N; i++) {
         const t = i / N;
-        const p = new Vector3().lerpVectors(_a, _b, t);
+        const p = pts[i].lerpVectors(_a, _b, t);
         p.y -= Math.sin(t * Math.PI) * (0.15 + slack * 0.5);
         // Rope lying on the water floats on it.
         p.y = Math.max(p.y, world.water.height(p.x, p.z) + 0.03);
-        pts.push(p);
       }
-      l.rope.geometry.dispose();
-      l.rope.geometry = new TubeGeometry(new CatmullRomCurve3(pts), 20, 0.03, 4, false);
+      l.rope.refresh();
 
       // Spear sits at the end pointing along the rope.
       l.spear.position.copy(_b);

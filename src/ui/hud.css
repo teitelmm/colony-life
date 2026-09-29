@@ -523,8 +523,12 @@ body {
   align-items: center;
   gap: 16px;
   padding: 8px 10px 8px 16px;
-  max-width: calc(100vw - 32px);
+  /* keep clear of the status panel (left) and stats panel (right) */
+  max-width: max(320px, calc(100vw - 520px));
   width: max-content;
+}
+.btop .cta {
+  flex: none;
 }
 .btop .keys span {
   white-space: nowrap;
@@ -799,4 +803,63 @@ button {
 }
 body.building #app {
   cursor: crosshair;
+}
+
+/* --- graphics setting & perf overlay --- */
+.gfx {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  justify-content: center;
+  margin-top: 16px;
+}
+.gfx .label {
+  margin-right: 6px;
+}
+.gfxbtn {
+  padding: 5px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--edge);
+  background: rgba(255, 255, 255, 0.06);
+  cursor: pointer;
+}
+.gfxbtn.on {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.gfxbtn:focus-visible {
+  outline: 2px solid var(--accent);
+}
+.gfxnote {
+  flex-basis: 100%;
+  text-transform: none;
+  letter-spacing: 0.02em;
+}
+.perf {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 6;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.7);
+  color: #cfe8ef;
+  font: 12px/1.45 ui-monospace, 'Chakra Petch', monospace;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+  white-space: pre;
+}
+.perf[hidden] {
+  display: none;
+}
+
+/* Markers are positioned with transforms (see Hud.update), anchored at the origin. */
+#crosshair,
+#hitmarker,
+#lead,
+.enemybar {
+  left: 0;
+  top: 0;
+  will-change: transform;
 }

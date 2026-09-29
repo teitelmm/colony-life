@@ -30,7 +30,8 @@ npm test         # unit tests (vitest)
 | **Enter** | Start the next wave now |
 | **Right click** | Cut a harpoon line |
 | **Wheel** | Zoom |
-| **Esc / M** | Pause / mute |
+| **Esc / M** | Pause / mute (the pause screen has the graphics setting) |
+| **`** (backtick) | Show frame rate, render resolution and quality tier |
 
 In build mode:
 
@@ -62,6 +63,31 @@ In build mode:
   - **Lighting and post:** dynamic light flashes, camera shake, bloom, and a war-torn colour grade with vignette, film grain and a red pulse when you're hit.
 - **Audio.** All sound is synthesised with WebAudio; there are no asset files.
 
+## Performance
+
+The game adapts to the machine it runs on. Pick a graphics mode on the pause screen: **Auto** (the default), **Low**, **Medium** or **High**.
+
+**Auto** watches the frame time:
+- **Frames too slow** (averaging over 20 ms for 2 s): lower the internal render resolution in 10% steps, down to 60%, then drop to the next tier down.
+- **Plenty of headroom** (under 13 ms for 5 s): step back up the same way.
+
+| | Low | Medium | High |
+|---|---|---|---|
+| Shadows | off | 1024 | 2048 |
+| Bloom | off | quarter-res | half-res |
+| Anti-aliasing (MSAA) | off | 2× | 4× |
+| Ocean grid | 180² | 240² | 320² |
+| Particles | half | full | full |
+| Pixel ratio | 1 | 1 | up to 1.5 |
+
+Other optimisations:
+- **Ocean shader:** the ripple and foam noise is baked once into a tiling texture, so the shader does four texture reads per pixel instead of about 30 procedural noise evaluations.
+- **Final pass:** tone mapping, colour conversion and the grade share one full-screen pass.
+- **Draw calls:** static geometry is batched per material. That covers each boat block, each gun, and each island with its ruins, and together with the gull changes it cuts the shadow and scene draw calls by about a third.
+- **Physics:** water height and vertical velocity come from one wave inversion.
+- **Ropes:** harpoon and fishing lines update their geometry in place.
+- **HUD:** text refreshes 10 times a second, and cursor markers move by transform.
+
 ## Code map
 
 ```
@@ -74,7 +100,7 @@ src/
   ai/        Enemy captain
   game/      Waves of enemies, loot and survivors, debris, crew (pure), repairs, fishing, World
   build/     Build rules (pure: placement, removal, costs, performance) and the 3D build mode
-  render/    Camera rig, post-processing, procedural textures
+  render/    Camera rig, post-processing, quality governor (pure), static batching, procedural textures
   ui/        DOM HUD, build palette, gun workshop
 tests/       Unit tests for waves, ballistics, weapons, boat stats/physics, hit tests, build rules, crew, workshop
 ```

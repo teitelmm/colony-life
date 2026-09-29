@@ -15,6 +15,7 @@ import {
 } from 'three';
 import type { WeaponDef } from './weaponDefs';
 import { rustyMetalTexture } from '../render/textures';
+import { mergeChildren } from '../render/merge';
 
 export interface WeaponRig {
   yaw: Group;
@@ -151,6 +152,10 @@ export function buildWeaponRig(def: WeaponDef, crewShirt?: number): WeaponRig {
     const tint = def.incendiary > 0 ? 0xd9482b : 0xe0b43a;
     pitch.add(mesh(new BoxGeometry(0.22, 0.06, 0.08), new MeshStandardMaterial({ color: tint, roughness: 0.5 }), 0, 0.13, 0));
   }
+
+  // Batch the static pieces of the mount and the barrel assembly.
+  mergeChildren(yaw);
+  mergeChildren(pitch, loaded ? [loaded] : []);
 
   let crew: Group | undefined;
   if (crewShirt !== undefined) {

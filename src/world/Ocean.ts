@@ -7,10 +7,10 @@
 import { Color, Mesh, PlaneGeometry, RingGeometry, ShaderMaterial, Vector2 } from 'three';
 import { maxAmplitude, wavesGLSL } from './waves';
 import { ENV, SKY_GLSL, skyUniforms } from './environment';
-import { FOAM_NOISE_GLSL, type FoamMap } from '../fx/FoamMap';
+import type { FoamMap } from '../fx/FoamMap';
+import { GRAD_SCALE, PERIOD, bakeOceanNoise } from './oceanNoise';
 
 const SIZE = 200;
-const SEGMENTS = 320;
 const FADE_START = 70;
 const FADE_END = 92;
 
@@ -46,31 +46,28 @@ uniform vec3 uDeep;
 uniform vec3 uShallow;
 uniform vec3 uFoamColor;
 uniform float uAmp;
+uniform sampler2D uNoise;
+uniform float uDetail;
 varying vec3 vWorld;
 varying vec3 vNormal;
 varying float vHeight;
 ${SKY_GLSL}
-${FOAM_NOISE_GLSL}
-float ffbm(vec2 p) {
-  float v = 0.0; float a = 0.5;
-  for (int i = 0; i < 4; i++) { v += a * fnoise(p); p = mat2(1.6, 1.2, -1.2, 1.6) * p; a *= 0.5; }
-  return v;
-}
+
+// Baked tiling noise (see oceanNoise.ts): lattice coords -> texture uv.
+const float PERIOD = ${PERIOD.toFixed(1)};
+const float GRAD = ${(1 / GRAD_SCALE).toFixed(4)};
 
 void main() {
   vec2 q = vWorld.xz;
   float t = uTime;
   float dist = length(cameraPosition - vWorld);
-  float detail = 1.0 - smoothstep(40.0, 140.0, dist);
+  float detail = (1.0 - smoothstep(40.0, 140.0, dist)) * uDetail;
 
-  // Small-scale ripples: gradient of two scrolling noise layers.
-  vec2 q1 = q * 0.75 + vec2(t * 0.35, t * 0.12);
-  vec2 q2 = q * 1.9 - vec2(t * 0.2, -t * 0.4);
-  float e = 0.15;
-  float n0 = ffbm(q1) + 0.5 * ffbm(q2);
-  float nx = ffbm(q1 + vec2(e, 0.0)) + 0.5 * ffbm(q2 + vec2(e, 0.0));
-  float nz = ffbm(q1 + vec2(0.0, e)) + 0.5 * ffbm(q2 + vec2(0.0, e));
-  vec3 N = normalize(vNormal + vec3(n0 - nx, 0.0, n0 - nz) * 0.5 * detail);
+  // Small-scale ripples: gradients of two scrolling noise layers (two texture reads).
+  vec4 n1 = texture2D(uNoise, (q * 0.75 + vec2(t * 0.35, t * 0.12)) / PERIOD);
+  vec4 n2 = texture2D(uNoise, (q * 1.9 - vec2(t * 0.2, -t * 0.4)) / PERIOD);
+  vec2 grad = ((n1.rg - 0.5) + (n2.rg - 0.5) * 0.5) * GRAD;
+  vec3 N = normalize(vNormal - vec3(grad.x, 0.0, grad.y) * 0.075 * detail);
 
   vec3 V = normalize(cameraPosition - vWorld);
   vec3 L = uSunDir;
@@ -102,7 +99,7 @@ void main() {
   // Oil slicks: near-black with thin-film iridescence.
   float oil = clamp(fm.g, 0.0, 0.92);
   if (oil > 0.001) {
-    float film = fnoise(q * 0.6 + t * 0.05) * 6.0 + NdV * 4.0;
+    float film = texture2D(uNoise, (q * 0.6 + t * 0.05) / PERIOD).b * 6.0 + NdV * 4.0;
     vec3 irid = 0.5 + 0.5 * cos(film + vec3(0.0, 2.1, 4.2));
     vec3 oilCol = vec3(0.01, 0.012, 0.012) + irid * 0.07 + refl * fres * 0.6;
     col = mix(col, oilCol, oil);
@@ -110,7 +107,7 @@ void main() {
 
   float crest = smoothstep(0.86, 1.0, h) * 0.45;
   float amount = clamp(crest + fm.r, 0.0, 1.6);
-  float pattern = ffbm(q * 2.2 + vec2(t * 0.04, 0.0)) * 0.6 + fnoise(q * 7.0 - t * 0.1) * 0.4;
+  float pattern = texture2D(uNoise, (q * 2.2 + vec2(t * 0.04, 0.0)) / PERIOD).b * 0.6 + texture2D(uNoise, (q * 7.0 - t * 0.1) / (PERIOD * 4.0)).a * 0.4;
   float foam = smoothstep(0.0, 0.2, amount - (1.0 - pattern)) * 0.9 + amount * 0.06;
   foam = clamp(foam, 0.0, 1.0) * (1.0 - oil * 0.8);
   col = mix(col, uFoamColor * (0.55 + 0.5 * diffuse), foam);
@@ -125,9 +122,10 @@ export class Ocean {
   readonly near: Mesh;
   readonly far: Mesh;
   readonly material: ShaderMaterial;
-  private readonly spacing = SIZE / SEGMENTS;
+  private spacing = SIZE / 256;
+  private segments = 0;
 
-  constructor(foam: FoamMap) {
+  constructor(foam: FoamMap, segments = 256) {
     this.material = new ShaderMaterial({
       vertexShader: vert,
       fragmentShader: frag,
@@ -144,11 +142,12 @@ export class Ocean {
         uShallow: { value: ENV.shallowWater },
         uFoamColor: { value: ENV.foamColor },
         uAmp: { value: maxAmplitude() * 0.75 },
+        uNoise: { value: bakeOceanNoise() },
+        uDetail: { value: 1 },
       },
     });
-    const nearGeo = new PlaneGeometry(SIZE, SIZE, SEGMENTS, SEGMENTS);
-    nearGeo.rotateX(-Math.PI / 2);
-    this.near = new Mesh(nearGeo, this.material);
+    this.near = new Mesh(undefined, this.material);
+    this.setSegments(segments);
     this.near.frustumCulled = false;
     this.near.renderOrder = -1;
 
@@ -157,6 +156,22 @@ export class Ocean {
     this.far = new Mesh(farGeo, this.material);
     this.far.frustumCulled = false;
     this.far.renderOrder = -1;
+  }
+
+  /** Grid resolution of the displaced near field (quality tiers). */
+  setSegments(segments: number): void {
+    if (segments === this.segments) return;
+    this.segments = segments;
+    this.spacing = SIZE / segments;
+    const geo = new PlaneGeometry(SIZE, SIZE, segments, segments);
+    geo.rotateX(-Math.PI / 2);
+    this.near.geometry.dispose();
+    this.near.geometry = geo;
+  }
+
+  /** Strength of the small ripples (quality tiers). */
+  setDetail(detail: number): void {
+    this.material.uniforms.uDetail.value = detail;
   }
 
   update(time: number, cx: number, cz: number): void {

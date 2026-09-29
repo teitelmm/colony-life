@@ -16,6 +16,21 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls = '', html = ''):
 
 const _v = new Vector3();
 
+/** DOM writes cost layout and style work: skip them when nothing changed. */
+function setText(e: HTMLElement, v: string): void {
+  if (e.textContent !== v) e.textContent = v;
+}
+const htmlCache = new WeakMap<HTMLElement, string>();
+function setHTML(e: HTMLElement, v: string): void {
+  if (htmlCache.get(e) !== v) {
+    htmlCache.set(e, v);
+    e.innerHTML = v;
+  }
+}
+function setStyle(e: HTMLElement, prop: 'display' | 'width' | 'left' | 'background', v: string): void {
+  if (e.style[prop] !== v) e.style[prop] = v;
+}
+
 export interface CrewInfo {
   count: number;
   berths: number;
@@ -95,6 +110,13 @@ export class Hud {
   private bannerTimer = 0;
   private layout: Layout = { ox: 0, oy: 0, cell: 1 };
   private lastPlayer: Boat | null = null;
+  /** picked a graphics mode on the pause screen */
+  onQualityMode: ((mode: 'auto' | 'low' | 'medium' | 'high') => void) | null = null;
+
+  setQualityMode(mode: string): void {
+    this.pause.querySelectorAll<HTMLButtonElement>('.gfxbtn').forEach((b) => b.classList.toggle('on', b.dataset.mode === mode));
+  }
+
   /** clicked a block on the schematic */
   onSchematicClick: ((part: PartInstance) => void) | null = null;
 
@@ -187,6 +209,18 @@ export class Hud {
     );
     this.over = el('div', 'screen hidden');
     this.pause = el('div', 'screen hidden', `<div class="card"><h1>PAUSED</h1><p>Press <kbd>Esc</kbd> or click to resume</p></div>`);
+    const gfx = el('div', 'gfx', '<span class="label">Graphics</span>');
+    for (const mode of ['auto', 'low', 'medium', 'high'] as const) {
+      const b = el('button', 'gfxbtn', mode === 'auto' ? 'Auto' : mode[0].toUpperCase() + mode.slice(1));
+      b.dataset.mode = mode;
+      b.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.onQualityMode?.(mode);
+      });
+      gfx.append(b);
+    }
+    gfx.append(el('div', 'label gfxnote', 'Auto lowers resolution and effects to keep the game smooth · <kbd>`</kbd> shows frame rate'));
+    this.pause.firstElementChild!.append(gfx);
 
     this.combatPanels = [helm, this.guns, this.crosshair, this.lead, this.hitmarker];
     this.root.append(status, wave, this.guns, helm, this.prompt, this.layer, this.lead, this.hitmarker, this.crosshair, this.banner);
@@ -227,67 +261,81 @@ export class Hud {
   }
 
   update(dt: number, s: HudState): void {
-    const { player } = s;
     this.hitTimer -= dt;
     if (this.hitTimer <= 0) this.hitmarker.style.opacity = '0';
     this.bannerTimer -= dt;
     if (this.bannerTimer <= 0) this.banner.style.opacity = '0';
     for (const p of this.combatPanels) p.style.visibility = s.building ? 'hidden' : '';
 
-    this.crosshair.style.left = this.hitmarker.style.left = `${s.mouseX}px`;
-    this.crosshair.style.top = this.hitmarker.style.top = `${s.mouseY}px`;
+    // Cursor-bound markers move every frame, via transforms (no layout).
+    const xy = `translate(${s.mouseX}px, ${s.mouseY}px)`;
+    this.crosshair.style.transform = this.hitmarker.style.transform = xy;
     this.crosshair.classList.toggle('blocked', !s.canBear);
-
     if (s.lead) {
       this.lead.style.display = 'block';
-      this.lead.style.left = `${s.lead.x}px`;
-      this.lead.style.top = `${s.lead.y}px`;
+      this.lead.style.transform = `translate(${s.lead.x}px, ${s.lead.y}px) rotate(45deg)`;
     } else this.lead.style.display = 'none';
 
-    this.wood.textContent = String(Math.floor(s.wood));
-    this.metal.textContent = String(Math.floor(s.metal));
-    this.food.textContent = String(Math.floor(s.crew.food));
+    // Everything else is read, not tracked: refresh it ten times a second.
+    this.slowTimer -= dt;
+    if (this.slowTimer <= 0) {
+      this.slowTimer = 0.1;
+      this.updateText(s);
+    }
+    this.updateEnemyBars(s);
+  }
+
+  private slowTimer = 0;
+
+  private updateText(s: HudState): void {
+    const { player } = s;
+    setText(this.wood, String(Math.floor(s.wood)));
+    setText(this.metal, String(Math.floor(s.metal)));
+    setText(this.food, String(Math.floor(s.crew.food)));
     this.food.classList.toggle('warn', s.crew.food <= s.crew.count);
     const c = s.crew;
-    this.crewLine.innerHTML = `<b>${c.count}</b> crew · <b>${c.berths}</b> bunks`;
-    this.crewNote.textContent = c.starving
-      ? 'Starving: work is slow, hands will desert'
-      : c.recruitEta !== null
-        ? `A drifter signs on in ${Math.ceil(c.recruitEta)}s`
-        : c.count >= c.berths
-          ? 'Bunks full · build a bunk cabin for more crew'
-          : 'Need 4 food to take on a drifter';
+    setHTML(this.crewLine, `<b>${c.count}</b> crew · <b>${c.berths}</b> bunks`);
+    setText(
+      this.crewNote,
+      c.starving
+        ? 'Starving: work is slow, hands will desert'
+        : c.recruitEta !== null
+          ? `A drifter signs on in ${Math.ceil(c.recruitEta)}s`
+          : c.count >= c.berths
+            ? 'Bunks full · build a bunk cabin for more crew'
+            : 'Need 4 food to take on a drifter',
+    );
     this.crewNote.classList.toggle('warn', c.starving);
-    this.waveNum.textContent = s.wave > 0 ? String(s.wave) : '—';
-    this.waveSub.textContent = s.waveSub;
-    this.score.textContent = s.score.toLocaleString();
+    setText(this.waveNum, s.wave > 0 ? String(s.wave) : '—');
+    setText(this.waveSub, s.waveSub);
+    setText(this.score, s.score.toLocaleString());
 
     if (s.prompt) {
-      this.prompt.style.display = 'block';
-      this.promptText.innerHTML = s.prompt.text;
-      const bar = this.promptFill.parentElement!;
-      bar.style.display = s.prompt.progress === undefined ? 'none' : 'block';
-      this.promptFill.style.width = `${Math.round((s.prompt.progress ?? 0) * 100)}%`;
-    } else this.prompt.style.display = 'none';
+      setStyle(this.prompt, 'display', 'block');
+      setHTML(this.promptText, s.prompt.text);
+      setStyle(this.promptFill.parentElement!, 'display', s.prompt.progress === undefined ? 'none' : 'block');
+      setStyle(this.promptFill, 'width', `${Math.round((s.prompt.progress ?? 0) * 100)}%`);
+    } else setStyle(this.prompt, 'display', 'none');
 
     if (player) {
       this.lastPlayer = player;
-      this.boatName.textContent = player.design.name;
+      setText(this.boatName, player.design.name);
       const hull = player.stats.hullIntegrity;
-      this.hullFill.style.width = `${Math.round(hull * 100)}%`;
+      setStyle(this.hullFill, 'width', `${Math.round(hull * 100)}%`);
       this.hullBar.classList.toggle('warn', hull < 0.6);
-      const kts = Math.abs(player.forwardSpeed()) * 1.944;
-      this.speed.textContent = kts.toFixed(0);
+      setText(this.speed, (Math.abs(player.forwardSpeed()) * 1.944).toFixed(0));
       const t = player.helm.throttle;
-      this.throttle.style.left = t >= 0 ? '50%' : `${50 + t * 50}%`;
-      this.throttle.style.width = `${Math.abs(t) * 50}%`;
+      setStyle(this.throttle, 'left', t >= 0 ? '50%' : `${50 + t * 50}%`);
+      setStyle(this.throttle, 'width', `${Math.abs(t) * 50}%`);
       this.updateGuns(player);
       const slow = player.turrets.find((tt) => tt.def.fireInterval > 1);
-      const r = slow ? slow.weapon.readiness : 1;
-      this.reload.style.background = r < 1 ? `conic-gradient(rgba(242,193,78,0.8) ${r * 360}deg, transparent 0)` : 'none';
-      this.reload.style.mask = 'radial-gradient(circle, transparent 58%, #000 60%)';
+      const r = slow ? Math.round(slow.weapon.readiness * 40) / 40 : 1;
+      setStyle(this.reload, 'background', r < 1 ? `conic-gradient(rgba(242,193,78,0.8) ${r * 360}deg, transparent 0)` : 'none');
       this.drawSchematic(player, s.jobStatus);
     }
+  }
+
+  private updateEnemyBars(s: HudState): void {
 
     // Enemy health bars.
     for (const [boat, bar] of this.bars) {
@@ -308,10 +356,10 @@ export class Hud {
       _v.y += 3.2;
       _v.project(s.camera);
       const onScreen = _v.z < 1 && Math.abs(_v.x) < 1.1 && Math.abs(_v.y) < 1.1;
-      bar.style.display = onScreen ? 'block' : 'none';
-      bar.style.left = `${((_v.x + 1) / 2) * s.width}px`;
-      bar.style.top = `${((1 - _v.y) / 2) * s.height}px`;
-      (bar.firstChild as HTMLElement).style.width = `${Math.round(boat.stats.hullIntegrity * 100)}%`;
+      setStyle(bar, 'display', onScreen ? 'block' : 'none');
+      if (!onScreen) continue;
+      bar.style.transform = `translate(${(((_v.x + 1) / 2) * s.width).toFixed(1)}px, ${(((1 - _v.y) / 2) * s.height).toFixed(1)}px)`;
+      setStyle(bar.firstChild as HTMLElement, 'width', `${Math.round(boat.stats.hullIntegrity * 100)}%`);
     }
   }
 
@@ -340,7 +388,7 @@ export class Hud {
       const w = t.weapon;
       const hot = w.def.heatPerShot > 0;
       row.bar.classList.toggle('hot', hot);
-      row.fill.style.width = `${Math.round((hot ? 1 - w.heat : w.readiness) * 100)}%`;
+      setStyle(row.fill, 'width', `${Math.round((hot ? 1 - w.heat : w.readiness) * 100)}%`);
       row.state.textContent = !t.manned ? 'NO GUNNER' : w.jammed ? 'JAMMED' : w.overheated ? 'OVERHEATED' : t.harpoonOut ? 'LINE OUT' : !t.canBear ? 'OUT OF ARC' : '';
       row.state.parentElement!.classList.toggle('active', t.manned);
     });

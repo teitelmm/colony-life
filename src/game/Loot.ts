@@ -4,7 +4,7 @@
  */
 
 import { BoxGeometry, CylinderGeometry, Group, Mesh, MeshStandardMaterial, Quaternion, SphereGeometry, TorusGeometry, Vector3, type Scene } from 'three';
-import { sampleNormal } from '../world/waves';
+import { sampleTilt } from '../world/waves';
 import { rustyMetalTexture, deckTexture } from '../render/textures';
 import type { World } from './World';
 
@@ -113,7 +113,7 @@ export class Loot {
       c.x += c.vx * dt + 0.25 * dt;
       c.z += c.vz * dt + 0.1 * dt;
       const y = world.water.height(c.x, c.z);
-      sampleNormal(c.x, c.z, world.time, _n);
+      sampleTilt(c.x, c.z, world.time, y, _n);
       c.obj.position.set(c.x, y + 0.1, c.z);
       _q.setFromUnitVectors(_up, _n as Vector3);
       c.obj.quaternion.copy(_q);

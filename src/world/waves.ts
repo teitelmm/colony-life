@@ -100,6 +100,50 @@ export function sampleHeight(x: number, z: number, t: number, waves: Wave[] = WA
   return tmp.y;
 }
 
+export interface SurfaceSample {
+  height: number;
+  /** vertical velocity of the water surface (m/s) */
+  vy: number;
+}
+
+/**
+ * Height and vertical velocity in one pass: a single inversion, then the
+ * analytic Gerstner vertical velocity (-a·k·c·cos f) at the solved point.
+ * Several times cheaper than finite differences over sampleHeight.
+ */
+export function sampleSurface(x: number, z: number, t: number, out: SurfaceSample, waves: Wave[] = WAVES): SurfaceSample {
+  let px = x;
+  let pz = z;
+  for (let i = 0; i < 3; i++) {
+    displace(px, pz, t, tmp, waves);
+    px -= tmp.x - x;
+    pz -= tmp.z - z;
+  }
+  let h = 0;
+  let vy = 0;
+  for (let i = 0; i < waves.length; i++) {
+    const w = waves[i];
+    const f = w.k * (w.dirX * px + w.dirZ * pz - w.c * t);
+    h += w.a * Math.sin(f);
+    vy -= w.a * w.k * w.c * Math.cos(f);
+  }
+  out.height = h;
+  out.vy = vy;
+  return out;
+}
+
+/** Cheap tilt for small floating props: two extra samples instead of four. */
+export function sampleTilt(x: number, z: number, t: number, h: number, out: Vec3Like, waves: Wave[] = WAVES): Vec3Like {
+  const e = 0.5;
+  const nx = h - sampleHeight(x + e, z, t, waves);
+  const nz = h - sampleHeight(x, z + e, t, waves);
+  const len = Math.hypot(nx, e, nz);
+  out.x = nx / len;
+  out.y = e / len;
+  out.z = nz / len;
+  return out;
+}
+
 /** Surface normal at world position (x, z) via central differences. */
 export function sampleNormal(x: number, z: number, t: number, out: Vec3Like, waves: Wave[] = WAVES): Vec3Like {
   const e = 0.35;

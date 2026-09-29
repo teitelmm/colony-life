@@ -246,11 +246,15 @@ export class ParticleSystem {
     this.mesh.renderOrder = additive ? 3 : 2;
   }
 
+  /** 0..1 fraction of emitted particles kept (quality tiers) */
+  density = 1;
+
   get alive(): number {
     return this.count;
   }
 
   emit(o: ParticleOpts): void {
+    if (this.density < 1 && Math.random() > this.density) return;
     let i = this.count;
     if (i >= this.cap) {
       // Overwrite a random old particle rather than dropping the new one.
